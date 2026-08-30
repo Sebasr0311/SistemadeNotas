@@ -18,6 +18,7 @@ from vision import gemini_extractor
 MSG_PROGRESO = "progreso"      # {"mensaje": str, "valor": float 0..1 (opcional)}
 MSG_RESULTADO = "resultado"    # {"planillas": [...], "paginas_total": int}
 MSG_ERROR = "error"            # {"mensaje": str}
+MSG_CANCELADO = "cancelado"    # {"mensaje": str} — cancelación, no un error
 
 
 class ProcesadorEnSegundoPlano:
@@ -55,10 +56,17 @@ class ProcesadorEnSegundoPlano:
             total = len(paginas)
 
             # 2) Leer cada planilla con Gemini.
-            def _progreso(mensaje):
+            def _progreso(mensaje, valor=None):
                 if self.cancelado:
                     raise _Cancelado()
-                self.cola.put({"tipo": MSG_PROGRESO, "mensaje": mensaje})
+                # None es sólo un chequeo de cancelación (lo llama el extractor
+                # dentro del loop de reintentos); no se encola un mensaje.
+                if mensaje is None:
+                    return
+                msg = {"tipo": MSG_PROGRESO, "mensaje": mensaje}
+                if valor is not None:
+                    msg["valor"] = valor
+                self.cola.put(msg)
 
             planillas = gemini_extractor.extraer_planilla_pdf(
                 paginas,
@@ -78,7 +86,9 @@ class ProcesadorEnSegundoPlano:
                 }
             )
         except _Cancelado:
-            self.cola.put({"tipo": MSG_ERROR, "mensaje": "El proceso fue cancelado."})
+            # La cancelación NO es un error: se informa como un estado propio
+            # (W4) para que la GUI lo muestre de forma amigable.
+            self.cola.put({"tipo": MSG_CANCELADO, "mensaje": "El proceso fue cancelado."})
         except pdf_loader.PdfError as e:
             self.cola.put({"tipo": MSG_ERROR, "mensaje": str(e)})
         except gemini_extractor.VisionError as e:

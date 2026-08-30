@@ -1,17 +1,21 @@
 """
 Test del generador de Excel.
 
-Corre el demo del módulo excel.generar_excel_notas (ejecutando su bloque
-__main__) y valida que el .xlsx generado existe y tiene las tres hojas de
-curso esperadas (Curso 0302, 0401 y 0501), además de fórmulas de definitiva.
+Genera un Excel de demo llamando directamente a `generar_excel_asignatura`
+(no con runpy, para evitar el RuntimeWarning de importar bajo __main__) y
+valida que el .xlsx existe y tiene las tres hojas de curso esperadas
+(Curso 0302, 0401 y 0501), además de fórmulas de definitiva.
+
+La salida se escribe en una carpeta temporal (tempfile.mkdtemp), nunca en una
+ruta fija del usuario (S5).
 
 Uso (desde la raíz del proyecto):
     python -m tests.test_generar_excel
 """
 
 import os
-import runpy
 import sys
+import tempfile
 import unittest
 
 # La raíz del proyecto se agrega al path para poder importar el paquete excel/.
@@ -19,34 +23,65 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-# Se importa el módulo del generador (requisito del test).
-import excel.generar_excel_notas  # noqa: F401
+import excel.generar_excel_notas  # noqa: E402,F401
 
-# Ruta de salida del demo (definida en el bloque __main__ del generador).
-_DEMO_XLSX = os.path.normpath(
-    r"C:\Users\JUAN\AppData\Local\Temp\opencode\demo_excel\notas_educacion_fisica_periodo3.xlsx"
-)
 _HOJAS_ESPERADAS = ["Curso 0302", "Curso 0401", "Curso 0501"]
+
+
+def _planilla(grupo: str, periodo: int) -> dict:
+    """Construye una planilla mínima en el formato que espera el generador."""
+    return {
+        "encabezado": {
+            "institucion": "INSTITUCION DEMO",
+            "sede": "SEDE",
+            "año_lectivo": "2026",
+            "jornada": "MAÑANA",
+            "grupo": grupo,
+            "asignatura": "MATEMATICAS",
+            "docente": "DOCENTE DEMO",
+            "periodo": periodo,
+        },
+        "estudiantes": [
+            {
+                "no": 1, "nombre": "ALUMNO UNO", "ev_anteriores": [45, 45],
+                "area_trabajo": [40, 50], "retirado": False,
+                "revisar": [False, False],
+            },
+            {
+                "no": 2, "nombre": "ALUMNO DOS", "ev_anteriores": [45],
+                "area_trabajo": None, "retirado": True, "revisar": [False, False],
+            },
+        ],
+    }
+
+
+def _demo_planillas() -> list:
+    """Simula el caso real: un PDF con 3 cursos de la misma asignatura."""
+    return [_planilla("0302", 3), _planilla("0401", 3), _planilla("0501", 3)]
 
 
 class TestGeneradorExcel(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # Ejecutar el bloque __main__ del generador (el demo), que genera el Excel.
-        runpy.run_module("excel.generar_excel_notas", run_name="__main__")
+        # Carpeta temporal: portable, sin rutas fijas a C:\Users\JUAN (S5).
+        cls.dir_salida = tempfile.mkdtemp(prefix="notas_test_")
+        cls.ruta_xlsx = os.path.join(cls.dir_salida, "notas_demo.xlsx")
+        excel.generar_excel_notas.generar_excel_asignatura(
+            _demo_planillas(), cls.ruta_xlsx
+        )
 
     def test_archivo_generado_existe(self):
         self.assertTrue(
-            os.path.exists(_DEMO_XLSX),
-            f"El demo no generó el archivo en {_DEMO_XLSX}",
+            os.path.exists(self.ruta_xlsx),
+            f"El demo no generó el archivo en {self.ruta_xlsx}",
         )
 
     def test_hojas_de_curso_esperadas(self):
-        self.assertTrue(os.path.exists(_DEMO_XLSX), "Falta el archivo generado")
+        self.assertTrue(os.path.exists(self.ruta_xlsx), "Falta el archivo generado")
         import openpyxl
 
-        wb = openpyxl.load_workbook(_DEMO_XLSX)
+        wb = openpyxl.load_workbook(self.ruta_xlsx)
         for hoja in _HOJAS_ESPERADAS:
             self.assertIn(
                 hoja, wb.sheetnames,
@@ -54,10 +89,10 @@ class TestGeneradorExcel(unittest.TestCase):
             )
 
     def test_existencia_formula_definitiva(self):
-        self.assertTrue(os.path.exists(_DEMO_XLSX), "Falta el archivo generado")
+        self.assertTrue(os.path.exists(self.ruta_xlsx), "Falta el archivo generado")
         import openpyxl
 
-        wb = openpyxl.load_workbook(_DEMO_XLSX)
+        wb = openpyxl.load_workbook(self.ruta_xlsx)
         ws = wb["Curso 0302"]
         hay_formula = any(
             isinstance(cell.value, str) and cell.value.startswith("=IFERROR(AVERAGE")

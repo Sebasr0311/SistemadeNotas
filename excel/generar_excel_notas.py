@@ -260,7 +260,14 @@ if __name__ == "__main__":
     planillas_pdf = [planilla_para("0302"), planilla_para("0401"), planilla_para("0501")]
 
     import os
-    ruta_salida = r"C:\Users\JUAN\AppData\Local\Temp\opencode\demo_excel\notas_educacion_fisica_periodo3.xlsx"
+    import tempfile
+
+    # Ruta demo portable: usa la carpeta temporal del sistema (S5), nunca una
+    # ruta fija a C:\Users\JUAN.
+    ruta_salida = os.path.join(
+        tempfile.gettempdir(),
+        "notas_educacion_fisica_periodo3.xlsx",
+    )
     os.makedirs(os.path.dirname(ruta_salida), exist_ok=True)
     ruta = generar_excel_asignatura(planillas_pdf, ruta_salida)
     print("Generado:", ruta)

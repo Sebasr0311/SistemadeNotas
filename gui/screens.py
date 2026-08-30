@@ -23,7 +23,7 @@ import customtkinter as ctk
 from config import app_config
 from excel import generar_excel_notas
 from . import styles
-from .worker import ProcesadorEnSegundoPlano, MSG_PROGRESO, MSG_RESULTADO, MSG_ERROR
+from .worker import ProcesadorEnSegundoPlano, MSG_PROGRESO, MSG_RESULTADO, MSG_ERROR, MSG_CANCELADO
 
 ABRIR_ARCHIVO = "open_file"
 ABRIR_CARPETA = "open_folder"
@@ -276,6 +276,15 @@ class App(ctk.CTk):
                     messagebox.showerror("No se pudo completar", msg["mensaje"])
                     self.mostrar_principal()
                     return
+                elif msg["tipo"] == MSG_CANCELADO:
+                    # La cancelación es un estado esperado (W4), no una falla:
+                    # se informa con un mensaje amigable, no con un error.
+                    messagebox.showinfo(
+                        "Proceso cancelado",
+                        "Proceso cancelado. Podés volver a cargar el PDF cuando quieras.",
+                    )
+                    self.mostrar_principal()
+                    return
         except queue.Empty:
             pass
         # Seguir revisando mientras el hilo siga vivo.
@@ -363,10 +372,23 @@ class App(ctk.CTk):
             titulo = f"Curso {curso} — Periodo {enc.get('periodo')}"
             if enc.get("grupo_erroneo"):
                 titulo += "  ⚠ (curso no reconocido, verificá el número)"
+            if enc.get("periodo_erroneo"):
+                titulo += "  ⚠ (periodo no reconocido, verificá el número)"
             ctk.CTkLabel(
                 tarjeta, text=titulo, font=(styles.FUENTE, styles.TAM_SUBTITULO, "bold"),
                 text_color=styles.COLOR_TEXTO,
             ).pack(anchor="w", padx=14, pady=(10, 2))
+
+            # Advertencia visible si el periodo o el grupo parecen incorrectos
+            # (W1): texto naranja/rojo para que la usuaria lo verifique.
+            if enc.get("periodo_erroneo") or enc.get("grupo_erroneo"):
+                ctk.CTkLabel(
+                    tarjeta,
+                    text="⚠ El periodo o el grupo de esta planilla parece incorrecto, "
+                         "verificá contra el papel.",
+                    font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
+                    text_color="#C0392B", wraplength=620, anchor="w",
+                ).pack(anchor="w", padx=14, pady=(0, 6))
 
             sub = f"{enc.get('asignatura','')}  •  {enc.get('docente','')}"
             ctk.CTkLabel(

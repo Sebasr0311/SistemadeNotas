@@ -51,10 +51,22 @@ class VisionError(Exception):
     """Error de visión con mensaje amigable para la usuaria."""
 
 
+class _PlanillaParseError(VisionError):
+    """Error de PARSEO del contenido devuelto por el modelo (no de red/API).
+    No se reintenta: el problema es que no se pudo interpretar la planilla."""
+
+
 def _cliente(api_key: str) -> genai.Client:
     if not api_key:
         raise VisionError("Falta la clave de Google AI. Cerra la app y configurala de nuevo.")
-    return genai.Client(api_key=api_key)
+    # Timeout de 60 s (60000 ms) para que una conexión colgada no bloquee el
+    # hilo para siempre y que Cancelar siga siendo útil. (Verificado por
+    # introspección: google-genai 2.20.0 acepta
+    # Client(..., http_options=types.HttpOptions(timeout=<ms>)).)
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=60000),
+    )
 
 
 def _rango_grupo_valido(grupo: str) -> bool:
@@ -66,6 +78,51 @@ def _rango_grupo_valido(grupo: str) -> bool:
         return False
     grado = int(str(grupo)[0:2])
     return 0 <= grado <= 5
+
+
+def _parsear_periodo(valor):
+    """
+    Parsea el periodo de forma tolerante (int, "3", "3.0", " 3 ").
+    Devuelve (periodo, ok). ok=False si no se puede convertir o queda fuera del
+    rango 1-4; en ese caso se devuelve el valor leído (entero si se puede) para
+    que la pantalla de revisión lo avise, sin corregirlo silenciosamente.
+    """
+    if isinstance(valor, bool):
+        return 0, False
+    if isinstance(valor, (int, float)):
+        p = int(valor)
+    elif isinstance(valor, str):
+        try:
+            p = int(float(valor.strip()))
+        except (ValueError, TypeError):
+            return 0, False
+    else:
+        return 0, False
+    return p, (1 <= p <= 4)
+
+
+def _coercion_bool(valor):
+    """
+    Coerción explícita de un valor booleano leído del modelo (los modelos suelen
+    devolver strings tipo "false"/"true"; bool("false") es True, un bug que esta
+    función corrige).
+    Devuelve (booleano, confiable). confiable=False indica un valor no
+    reconocido: se conserva y se marca para revisión, nunca se adivina.
+    true/1/sí/si/yes (case-insensitive) -> True
+    false/0/no / vacío/None -> False
+    """
+    if valor is None:
+        return False, True
+    if isinstance(valor, bool):
+        return valor, True
+    if isinstance(valor, (int, float)):
+        return valor != 0, True
+    s = str(valor).strip().lower()
+    if s in ("true", "1", "1.0", "sí", "si", "yes"):
+        return True, True
+    if s in ("false", "0", "0.0", "no", ""):
+        return False, True
+    return bool(valor), False
 
 
 def _numero_plausible(valor):
@@ -121,10 +178,9 @@ def _normalizar_planilla(datos: dict) -> dict:
     """
     enc_raw = datos.get("encabezado") or {}
 
-    # Clave "año_lectivo" (el generador la usa así).
-    periodo = int(enc_raw.get("periodo") or 0)
-    if periodo < 1 or periodo > 4:
-        periodo = 1
+    # Periodo parseado de forma tolerante (W2) y SIN corregir silenciosamente:
+    # un periodo fuera de rango (ej. 9) ya no se transforma a 1 (W1).
+    periodo, periodo_ok = _parsear_periodo(enc_raw.get("periodo"))
 
     grupo = str(enc_raw.get("grupo") or "").strip()
     # Si el grupo no cumple el formato esperado, se marca en el encabezado
@@ -144,13 +200,22 @@ def _normalizar_planilla(datos: dict) -> dict:
     }
     if not grupo_ok:
         encabezado["grupo_erroneo"] = True
+    if not periodo_ok:
+        encabezado["periodo_erroneo"] = True
 
     n_ev_anteriores = periodo - 1
     estudiantes = []
     for est in (datos.get("estudiantes") or []):
         if not isinstance(est, dict):
             continue
-        retirado = bool(est.get("retirado")) or _fila_retirada(est)
+        # retirado con coerción explícita (W6): bool("false") ya no da True.
+        retirado_b, retirado_conf = _coercion_bool(est.get("retirado"))
+        if retirado_conf:
+            retirado = retirado_b or _fila_retirada(est)
+        else:
+            # Valor no reconocido: no marcar retirado a ciegas (evita perder un
+            # estudiante del cálculo); se usa la marca de fila como respaldo.
+            retirado = _fila_retirada(est)
         nombre = str(est.get("nombre") or "").strip()
 
         if retirado:
@@ -167,7 +232,10 @@ def _normalizar_planilla(datos: dict) -> dict:
         rev = est.get("revisar")
         rev_flags = [False, False]
         if isinstance(rev, list):
-            rev_flags = [bool(rev[0]), bool(rev[1]) if len(rev) > 1 else False]
+            for i in range(2):
+                val = rev[i] if i < len(rev) else None
+                r, conf = _coercion_bool(val)
+                rev_flags[i] = r if conf else True
         elif isinstance(rev, (int, float)) and not isinstance(rev, bool):
             rev_flags = [rev == 1, False]
 
@@ -241,9 +309,14 @@ def extraer_planilla_pagina(
 
     ultimo_error = None
     for intento in range(1, INTENTOS_MAX + 1):
+        # Chequear cancelación en cada intento: el callback del worker lanza si
+        # la usuaria canceló, abortando la extracción sin esperar reintentos
+        # (W3). El valor None es sólo un chequeo, no un mensaje visible.
+        if progreso_cb:
+            progreso_cb(None)
+        if intento > 1 and _notify:
+            _notify(f"Reintentando lectura de {pagina_label or 'esta planilla'} (intento {intento})...")
         try:
-            if intento > 1 and _notify:
-                _notify(f"Reintentando lectura de {pagina_label or 'esta planilla'} (intento {intento})...")
             response = client.models.generate_content(
                 model=modelo,
                 contents=[prompt, imagen],
@@ -255,12 +328,21 @@ def extraer_planilla_pagina(
             texto = response.text
             if not texto:
                 raise VisionError("El modelo no devolvió respuesta.")
-            datos = _extraer_json(texto)
-            return _normalizar_planilla(datos)
+            try:
+                datos = _extraer_json(texto)
+                return _normalizar_planilla(datos)
+            except Exception as e:
+                # El modelo devolvió algo que no se pudo interpretar: es un
+                # error de PARSEO (W2), no de red/API; no se reintenta.
+                raise _PlanillaParseError(
+                    "No se pudo interpretar el contenido de la planilla."
+                ) from e
+        except _PlanillaParseError:
+            raise
         except VisionError as e:
             ultimo_error = e
         except Exception as e:
-            # Errores de red/API: reintentar con espera.
+            # Errores de red/API: reintentar con espera (backoff actual).
             ultimo_error = e
         if intento < INTENTOS_MAX:
             time.sleep(ESPERA_BASE_SEG * intento)
@@ -295,7 +377,9 @@ def extraer_planilla_pdf(
     total = len(paginas)
     for i, pag in enumerate(paginas, start=1):
         if progreso_cb:
-            progreso_cb(f"Leyendo planilla {i} de {total}...")
+            # Valor = i/total (fracción 0..1) para actualizar la barra real
+            # (S1): cada página procesada mueve el progreso, no sólo la primera.
+            progreso_cb(f"Leyendo planilla {i} de {total}...", i / total)
         planilla = extraer_planilla_pagina(
             pag["imagen"],
             api_key=api_key,

@@ -37,6 +37,11 @@ la app lee las notas escritas a mano y genera un Excel con una hoja por curso.
    Google AI Studio). La clave queda guardada en tu computador en
    `%APPDATA%\SistemaNotas\config.json`.
 
+   ⚠️ **IMPORTANTE:** esa clave se guarda en **texto plano** en
+   `%APPDATA%\SistemaNotas\config.json` y **no debe compartirse**: cualquiera
+   que la tenga puede usar tu cuenta de Google AI (y consumir tu cuota). Si
+   creés que se comprometió, revocala en Google AI Studio.
+
 ## Cómo usarla
 
 1. Al abrir, pega tu clave de Google AI y presiona "Guardar y continuar".
