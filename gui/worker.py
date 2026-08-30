@@ -16,7 +16,7 @@ from vision import gemini_extractor
 
 # Tipos de mensaje que se envían a la cola.
 MSG_PROGRESO = "progreso"      # {"mensaje": str, "valor": float 0..1 (opcional)}
-MSG_RESULTADO = "resultado"    # {"planillas": [...], "paginas_total": int}
+MSG_RESULTADO = "resultado"    # {"planillas": [...], "paginas_total": int, "fallidas": [...]}
 MSG_ERROR = "error"            # {"mensaje": str}
 MSG_CANCELADO = "cancelado"    # {"mensaje": str} — cancelación, no un error
 
@@ -68,7 +68,7 @@ class ProcesadorEnSegundoPlano:
                     msg["valor"] = valor
                 self.cola.put(msg)
 
-            planillas = gemini_extractor.extraer_planilla_pdf(
+            planillas, fallidas = gemini_extractor.extraer_planilla_pdf(
                 paginas,
                 api_key=api_key,
                 modelo=modelo,
@@ -83,6 +83,7 @@ class ProcesadorEnSegundoPlano:
                     "tipo": MSG_RESULTADO,
                     "planillas": planillas,
                     "paginas_total": total,
+                    "fallidas": fallidas,
                 }
             )
         except _Cancelado:

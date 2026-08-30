@@ -46,6 +46,9 @@ MODELO_POR_DEFECTO = "gemini-3.7-flash"
 INTENTOS_MAX = 3
 ESPERA_BASE_SEG = 2.0
 
+# Rango razonable para una nota (0 a 100). Fuera de rango -> revisión.
+RANGO_NOTA = (0, 100)
+
 
 class VisionError(Exception):
     """Error de visión con mensaje amigable para la usuaria."""
@@ -126,26 +129,39 @@ def _coercion_bool(valor):
 
 
 def _numero_plausible(valor):
-    """Devuelve el número si parece una nota razonable, o None/flag según el caso."""
-    # Los modelos a veces devuelven cadenas tipo "4 5", "45 " o "4,5".
+    """
+    Devuelve (valor, confiable).
+
+    confiable=False => el valor crudo es ambiguo (dígitos muy separados tipo
+    "4 5") o no es un número: se devuelve None para que la pantalla de revisión
+    lo corrija. NUNCA se fusionan dígitos separados (S6): "4 5" no es 45.
+    Los bools no son notas y no son ambiguos: (None, True).
+    """
     if isinstance(valor, bool):
-        return None
+        return None, True
     if isinstance(valor, (int, float)):
-        return valor
+        return valor, True
     if isinstance(valor, str):
-        limpio = valor.strip().replace(",", ".")
-        limpio = re.sub(r"\s+", "", limpio)
+        s = valor.strip().replace(",", ".")
+        # Decimales españoles con espacios sueltos alrededor del punto:
+        # "4 ,5" -> "4.5" es confiable. Fuera de eso, cualquier espacio
+        # interno restante (ej. "4 5", "12 3") es un número partido: no se
+        # fusiona jamás.
+        s = re.sub(r"\s*\.\s*", ".", s)
+        if re.search(r"\s", s):
+            return None, False
         try:
-            return float(limpio)
+            return float(s), True
         except ValueError:
-            return None
-    return None
+            return None, False
+    return None, True
 
 
 def _normalizar_area(valores, revisar_flags):
     """
     Devuelve (area_trabajo, revisar) con exactamente 2 celdas.
     - Celdas en blanco -> None.
+    - Valor ambiguo (dígitos separados) o no numérico -> None + marcar revisión.
     - Fuera de rango (no entre 0 y 100) -> marcar revisión True y dejar el valor.
     """
     area = [None, None]
@@ -154,21 +170,33 @@ def _normalizar_area(valores, revisar_flags):
         return area, revisar
     for i in range(2):
         v = valores[i] if i < len(valores) else None
-        num = _numero_plausible(v)
+        num, confiable = _numero_plausible(v)
         area[i] = num
-        if num is not None and not (0 <= num <= 100):
+        if not confiable and v not in (None, ""):
+            revisar[i] = True
+        if num is not None and not (RANGO_NOTA[0] <= num <= RANGO_NOTA[1]):
             revisar[i] = True
     return area, revisar
 
 
 def _normalizar_ev(valores, n_esperadas):
-    """Ev. Anteriores: lista de n_esperadas celdas (blanco -> None)."""
+    """Ev. Anteriores: lista de n_esperadas celdas (blanco -> None).
+
+    Devuelve (ev, revisar_ev): revisar_ev=True si alguna celda dio un valor
+    ambiguo (dígitos separados) o quedó fuera del rango 0-100. Celda en
+    blanco/None no marca revisión.
+    """
     ev = []
+    revisar_ev = False
     for i in range(n_esperadas):
         v = valores[i] if valores and i < len(valores) else None
-        num = _numero_plausible(v)
+        num, confiable = _numero_plausible(v)
         ev.append(num)
-    return ev
+        if not confiable and v not in (None, ""):
+            revisar_ev = True
+        if num is not None and not (RANGO_NOTA[0] <= num <= RANGO_NOTA[1]):
+            revisar_ev = True
+    return ev, revisar_ev
 
 
 def _normalizar_planilla(datos: dict) -> dict:
@@ -226,6 +254,7 @@ def _normalizar_planilla(datos: dict) -> dict:
                 "area_trabajo": None,
                 "retirado": True,
                 "revisar": [False, False],
+                "revisar_ev": False,
             })
             continue
 
@@ -240,7 +269,7 @@ def _normalizar_planilla(datos: dict) -> dict:
             rev_flags = [rev == 1, False]
 
         area, revisar = _normalizar_area(est.get("area_trabajo"), rev_flags)
-        ev = _normalizar_ev(est.get("ev_anteriores"), n_ev_anteriores)
+        ev, revisar_ev = _normalizar_ev(est.get("ev_anteriores"), n_ev_anteriores)
 
         estudiantes.append({
             "no": int(est.get("no") or 0),
@@ -249,6 +278,7 @@ def _normalizar_planilla(datos: dict) -> dict:
             "area_trabajo": area,
             "retirado": False,
             "revisar": revisar,
+            "revisar_ev": revisar_ev,
         })
 
     return {"encabezado": encabezado, "estudiantes": estudiantes}
@@ -367,8 +397,13 @@ def extraer_planilla_pdf(
     por_pagina_cb=None,
 ):
     """
-    Procesa todas las páginas del PDF y devuelve la lista de planillas
-    (una por página) en el formato del generador de Excel.
+    Procesa todas las páginas del PDF y devuelve (planillas, fallidas).
+
+    Una página que falla (error de visión tras los reintentos o error de
+    parseo) NO tira el lote (S2): se anota en `fallidas` con su número y tipo
+    y se continúa con las demás. Cualquier OTRA excepción (incluida la
+    cancelación del worker) se propaga sin atrapar: no se traga nada que no
+    sea un fallo propio de lectura de una planilla.
 
     Args:
         paginas: lista de dicts de `pdf_loader.cargar_paginas`.
@@ -377,25 +412,39 @@ def extraer_planilla_pdf(
         progreso_cb: callback de estado (mensaje).
         por_pagina_cb: callback opcional que recibe (indice, planilla) tras cada
                        página exitosa (útil para cancelar/saltar).
+
+    Returns:
+        (planillas, fallidas):
+        - planillas: lista de planillas normalizadas (una por página OK).
+        - fallidas: lista de dicts {"pagina": int, "total": int,
+          "tipo": "vision"|"parseo"} por cada página que no se pudo leer.
     """
     planillas = []
+    fallidas = []
     total = len(paginas)
     for i, pag in enumerate(paginas, start=1):
         if progreso_cb:
             # Valor = i/total (fracción 0..1) para actualizar la barra real
             # (S1): cada página procesada mueve el progreso, no sólo la primera.
             progreso_cb(f"Leyendo planilla {i} de {total}...", i / total)
-        planilla = extraer_planilla_pagina(
-            pag["imagen"],
-            api_key=api_key,
-            modelo=modelo,
-            pagina_label=f"planilla {i} de {total}",
-            progreso_cb=progreso_cb,
-        )
+        try:
+            planilla = extraer_planilla_pagina(
+                pag["imagen"],
+                api_key=api_key,
+                modelo=modelo,
+                pagina_label=f"planilla {i} de {total}",
+                progreso_cb=progreso_cb,
+            )
+        except (VisionError, _PlanillaParseError) as e:
+            # S2: página ilegible -> se registra y se sigue con las demás.
+            tipo = "parseo" if isinstance(e, _PlanillaParseError) else "vision"
+            app_config.escribir_log(f"No se pudo leer la planilla {i} de {total}: {e!r}")
+            fallidas.append({"pagina": i, "total": total, "tipo": tipo})
+            continue
         planillas.append(planilla)
         if por_pagina_cb:
             por_pagina_cb(i, planilla)
-    return planillas
+    return planillas, fallidas
 
 
 # Prompt en español, claro y simple, que le pide al modelo devolver JSON con la
@@ -455,6 +504,8 @@ REGLAS IMPORTANTES:
      pon false. Nunca inventes un valor dudoso para evitar la revisión.
    - Las notas suelen ser números enteros o decimales (ej. 45, 40, 4.5, 50). Devolvé
      el número tal cual aparece en la planilla, sin cambiar su escala.
+   - Si un número está escrito con los dígitos muy separados (ej. "4 5") NO lo
+     escribas como uno solo: devolvé null y marcá revisar en true.
 
 3. Devolvé SOLO el JSON. No agregues explicaciones.
 """.strip()

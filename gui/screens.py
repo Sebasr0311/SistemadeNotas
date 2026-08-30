@@ -42,6 +42,7 @@ class App(ctk.CTk):
 
         self.planillas = []           # planillas extraídas (una por página)
         self.paginas_total = 0
+        self.paginas_fallidas = []    # páginas que no se pudieron leer (S2)
         self.planilla_actual_idx = 0  # índice usado en la pantalla de revisión
         self._worker_cola = None
         self._worker = None
@@ -263,13 +264,29 @@ class App(ctk.CTk):
                 elif msg["tipo"] == MSG_RESULTADO:
                     self.planillas = msg["planillas"]
                     self.paginas_total = msg.get("paginas_total", len(msg["planillas"]))
+                    self.paginas_fallidas = msg.get("fallidas", [])
                     self.planilla_actual_idx = 0
                     if not self.planillas:
-                        messagebox.showinfo(
-                            "Sin datos", "No se encontraron planillas en el PDF."
+                        # S2: ninguna página se pudo leer -> error claro, y
+                        # NO se pasa a una pantalla de revisión vacía.
+                        messagebox.showerror(
+                            "No se pudo leer",
+                            "No se pudo leer ninguna página del PDF. Revisá que las "
+                            "planillas estén bien escaneadas y volvé a intentar.",
                         )
                         self.mostrar_principal()
                         return
+                    if self.paginas_fallidas:
+                        # S2: algunas páginas fallaron pero el resto sirve: se
+                        # avisa y se continúa igual a la revisión.
+                        lista = ", ".join(str(f["pagina"]) for f in self.paginas_fallidas)
+                        messagebox.showwarning(
+                            "Algunas páginas no se leyeron",
+                            f"Se generaron {len(self.planillas)} de {self.paginas_total} "
+                            f"planillas. No se pudieron leer las páginas: {lista}. "
+                            "Podés revisar las que sí se leyeron, o escanear de nuevo "
+                            "las que fallaron.",
+                        )
                     self.mostrar_revision()
                     return
                 elif msg["tipo"] == MSG_ERROR:
@@ -414,6 +431,19 @@ class App(ctk.CTk):
                 tarjeta, text=sub, font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
                 text_color=styles.COLOR_TEXTO_SECUNDARIO,
             ).pack(anchor="w", padx=14, pady=(0, 6))
+
+            # S3: aviso si alguna nota de Ev. Anteriores del curso quedó marcada
+            # (fuera de rango o dígitos ambiguos). Las celdas de Ev. Anteriores no
+            # son editables acá, así que la usuaria debe verificarlas contra el
+            # papel antes de generar el Excel.
+            if any(est.get("revisar_ev") for est in estudiantes):
+                ctk.CTkLabel(
+                    tarjeta,
+                    text="Hay notas de Ev. Anteriores que parecen fuera de rango en "
+                         "este curso — verificá los valores antes de generar.",
+                    font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
+                    text_color="#B8860B", wraplength=620, anchor="w",
+                ).pack(anchor="w", padx=14, pady=(0, 6))
 
             # Encabezados de columnas.
             cabecera = ctk.CTkFrame(tarjeta, fg_color="#EDF2FB", corner_radius=8)
@@ -564,6 +594,9 @@ class App(ctk.CTk):
                         revisar[celda_idx] = False
                 est["area_trabajo"] = area
                 est["revisar"] = revisar
+                # S3: el flag de Ev. Anteriores se preserva tal cual al editarla;
+                # no se recalcula ni se borra (no hay celdas editables para ev).
+                est["revisar_ev"] = bool(est.get("revisar_ev"))
 
     def _nombre_archivo_sugerido(self):
         enc = self.planillas[0]["encabezado"] if self.planillas else {}
