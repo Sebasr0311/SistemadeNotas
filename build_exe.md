@@ -1,7 +1,15 @@
 # Cómo generar el .exe (Windows) con PyInstaller
 
-Estás instrucciones crean un único ejecutable `.exe` de la app para Windows,
+> ⚠️ **Si cambiás el código, RE-CONSTRUÍ el .exe: el `dist\SistemaNotas.exe`
+> vale solo para el commit en que se construyó. No se actualiza solo.**
+
+Estas instrucciones crean un único ejecutable `.exe` de la app para Windows,
 sin necesidad de tener Python instalado en la máquina de la usuaria.
+
+> **Usá SIEMPRE el PyInstaller del entorno virtual**
+> (`.venv\Scripts\pyinstaller.exe`): el Python del sistema no tiene las
+> dependencias de la app instaladas, y compilar contra el entorno equivocado
+> produce un .exe que falla al abrir.
 
 ## Requisitos
 
@@ -16,29 +24,21 @@ sin necesidad de tener Python instalado en la máquina de la usuaria.
    cd C:\Users\JUAN\SistemadeNotas
    ```
 
-2. Creá y activá un entorno virtual (opcional pero recomendado):
+2. Si todavía no existe, creá y activá el entorno virtual e instalá las
+   dependencias de la app y PyInstaller:
 
    ```
    python -m venv .venv
    .venv\Scripts\activate
-   ```
-
-3. Instalá las dependencias de la app:
-
-   ```
    pip install -r requirements.txt
-   ```
-
-4. Instalá PyInstaller:
-
-   ```
    pip install pyinstaller
    ```
 
-5. Generá el ejecutable (una sola ventana de aplicación, sin consola):
+3. Generá el ejecutable (una sola ventana de aplicación, sin consola) con el
+   PyInstaller del venv:
 
    ```
-   pyinstaller --onefile --windowed --name SistemaNotas app.py
+   .venv\Scripts\pyinstaller --onefile --windowed --name SistemaNotas app.py
    ```
 
    Opciones:
@@ -46,7 +46,7 @@ sin necesidad de tener Python instalado en la máquina de la usuaria.
    - `--windowed`: ventana de aplicación, sin consola de terminal.
    - `--name SistemaNotas`: nombre del ejecutable.
 
-6. El ejecutable queda en:
+4. El ejecutable queda en:
 
    ```
    C:\Users\JUAN\SistemadeNotas\dist\SistemaNotas.exe
@@ -55,7 +55,7 @@ sin necesidad de tener Python instalado en la máquina de la usuaria.
    Podés copiarlo a donde quieras (por ejemplo, al escritorio) y usarlo sin
    instalar nada más.
 
-## Prueba final
+## Prueba final (posición de nunca jamás)
 
 1. Ejecutá `dist\SistemaNotas.exe`.
 2. La app debe abrir la primera pantalla pidiendo la clave de Google AI.
@@ -72,7 +72,7 @@ sin necesidad de tener Python instalado en la máquina de la usuaria.
 
 ## Solución de problemas comunes
 
-- **"No module named ..." al compilar**: asegurate de haber instalado las
-  dependencias en el mismo entorno desde el que corrés PyInstaller.
+- **"No module named ..." al compilar**: asegurate de estar corriendo el
+  PyInstaller del venv (`.venv\Scripts\pyinstaller.exe`), no el del sistema.
 - **El .exe abre y se cierra de inmediato**: revisá `%APPDATA%\SistemaNotas\log.txt`
   para ver el error registrado por la app.

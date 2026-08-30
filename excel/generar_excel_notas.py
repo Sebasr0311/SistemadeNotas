@@ -159,26 +159,25 @@ def generar_excel_asignatura(planillas: list, ruta_salida: str):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # se reemplaza por una hoja por curso
 
-    # Agrupar por grupo (curso) — normalmente 1 planilla por curso, pero si llegan
-    # varias páginas del mismo curso (ej. planilla partida en 2 hojas) se combinan.
-    por_grupo = {}
-    orden_grupos = []
-    for p in planillas:
-        grupo = p["encabezado"]["grupo"]
-        if grupo not in por_grupo:
-            por_grupo[grupo] = []
-            orden_grupos.append(grupo)
-        por_grupo[grupo].append(p)
+    # S8: la agrupación por curso y la combinación de estudiantes viven en
+    # excel/agrupacion.py, la MISMA fuente de verdad que usa la pantalla de
+    # revisión de la GUI: el Excel escribe exactamente lo que la GUI muestra.
+    # S11: combinar_estudiantes descarta estudiantes duplicados (páginas
+    # repetidas o solapadas) antes de escribirlos.
+    from excel.agrupacion import agrupar_por_curso, combinar_estudiantes
+
+    por_curso, orden_grupos = agrupar_por_curso(planillas)
 
     nombres_usados = set()
     for grupo in orden_grupos:
-        paginas = por_grupo[grupo]
-        if len(paginas) > 1:
-            base = dict(paginas[0])
-            base["estudiantes"] = [est for pg in paginas for est in pg["estudiantes"]]
-            planilla_final = base
-        else:
-            planilla_final = paginas[0]
+        paginas = por_curso[grupo]
+        # SIEMPRE se combina con dedupe (S11), incluso con una sola página:
+        # la pantalla de revisión combina igual, y lo que el Excel escribe debe
+        # ser EXACTAMENTE lo que la GUI mostró (S8). Sin duplicados, es la
+        # identidad: misma hoja y mismas filas que el comportamiento histórico.
+        base = dict(paginas[0])
+        base["estudiantes"] = combinar_estudiantes(paginas)
+        planilla_final = base
 
         nombre_hoja = f"Curso {grupo}"[:31]
         original = nombre_hoja

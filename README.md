@@ -1,25 +1,35 @@
 # Sistema de Digitalización de Planillas de Notas
 
-Aplicación de escritorio para convertir tus planillas de notas en papel a un
-Excel con las notas definitivas ya calculadas.
+Aplicación de escritorio para docentes: escaneás las planillas de notas en
+papel de una asignatura, la app lee lo manuscrito con visión por IA y te
+genera un Excel con una hoja por curso y las definitivas ya calculadas.
 
-Está pensada para docentes sin conocimientos técnicos: escaneás las planillas
-de una misma asignatura (pueden ser de varios cursos), las cargás en la app, y
-la app lee las notas escritas a mano y genera un Excel con una hoja por curso.
+## Cómo se usa
 
-## Qué hace
+1. **Primera vez, pegá tu clave de Google AI** (gratis en Google AI Studio) y
+   presioná "Guardar y continuar".
+2. **Elegí el PDF** con las planillas escaneadas de una asignatura (puede tener
+   varios cursos: la app los ordena solos).
+3. **Revisá lo que se leyó**: las notas dudosas aparecen en amarillo. Tocá una
+   celda y corregí el valor si hace falta.
+4. **Generá el Excel**: indicá dónde guardarlo y listo. En la pantalla final
+   podés abrir el archivo o la carpeta.
 
-- Lee un PDF con varias planillas escaneadas de una misma asignatura.
-- Detecta automáticamente el curso y el periodo de cada planilla.
-- Lee las notas manuscritas (con el modelo de visión de Google Gemini).
-- Calcula la definitiva de cada estudiante con fórmulas reales de Excel.
-- Si la planilla es del periodo 4, agrega la "Definitiva Anual".
-- Marca en amarillo cualquier nota dudosa para que la verifiques contra el papel.
-- Detecta estudiantes retirados (filas con `****`) y los excluye de los cálculos.
+> Detalles útiles: los estudiantes duplicados por un escaneo solapado se
+> descartan automáticamente; las filas retiradas (`****`) se excluyen de los
+> cálculos; en el periodo 4 se agrega la "Definitiva Anual".
 
-## Cómo instalarlo (para desarrollo)
+## Dónde quedan los archivos
 
-1. Crear el entorno e instalar dependencias:
+| Qué | Dónde |
+|-----|-------|
+| Excel generado | La carpeta que elijas al guardar (recuerda la última usada) |
+| Clave de Google AI | `%APPDATA%\SistemaNotas\config.json` |
+| Registro de errores | `%APPDATA%\SistemaNotas\log.txt` |
+
+## Cómo correrla desde el código (desarrollo)
+
+1. Creá el entorno e instalá las dependencias:
 
    ```
    python -m venv .venv
@@ -27,47 +37,45 @@ la app lee las notas escritas a mano y genera un Excel con una hoja por curso.
    pip install -r requirements.txt
    ```
 
-2. Ejecutar la app:
+2. Ejecutá la app:
 
    ```
    python app.py
    ```
 
-3. La primera vez la app te pedirá tu clave de Google AI (se obtiene gratis en
-   Google AI Studio). La clave queda guardada en tu computador en
-   `%APPDATA%\SistemaNotas\config.json`.
+> ¿Usuaria final? No necesitás nada de esto: existe un `.exe` ya armado.
+> Consultá `build_exe.md` para conocer su ubicación y cómo reconstruirlo si
+> cambia el código.
 
-   ⚠️ **IMPORTANTE:** esa clave se guarda en **texto plano** en
-   `%APPDATA%\SistemaNotas\config.json` y **no debe compartirse**: cualquiera
-   que la tenga puede usar tu cuenta de Google AI (y consumir tu cuota). Si
-   creés que se comprometió, revocala en Google AI Studio.
+## Solución de problemas
 
-## Cómo usarla
+- **"Clave inválida" o no responde la app**: revisá que la clave de Google AI
+  sea correcta y que tengas conexión a internet. Podés cambiarla desde el
+  botón "Cambiar la clave" de la pantalla principal.
+- **Una página no se leyó**: la app genera las que sí se leyeron y te avisa
+  cuáles fallaron. Verificá que esa planilla esté bien escaneada (sin manchas
+  ni cortes) y escaneala de nuevo.
+- **Ninguna página se leyó**: revisá la calidad del escaneo y la conexión.
+- **El .exe abre y se cierra de inmediato**: revisá
+  `%APPDATA%\SistemaNotas\log.txt` para ver el error.
 
-1. Al abrir, pega tu clave de Google AI y presiona "Guardar y continuar".
-2. En la pantalla principal presiona "Cargar PDF de planillas".
-3. Elegí el PDF con las planillas escaneadas de una asignatura.
-4. Esperá el progreso (la app está leyendo las planillas).
-5. Revisá la pantalla de revisión: las celdas dudosas aparecen en amarillo.
-   Corregí un valor tocándolo y escribiendo la nota correcta si hace falta.
-6. Presioná "Generar Excel", indicá dónde guardarlo y listo.
-7. En la pantalla final podés "Abrir archivo" o "Abrir carpeta".
+## Seguridad
+
+⚠️ **Tu clave de Google AI se guarda en texto plano** en
+`%APPDATA%\SistemaNotas\config.json` y **no debe compartirse**: cualquiera que
+la tenga puede usar tu cuenta de Google AI (y consumir tu cuota). Si creés que
+se comprometió, revocala en Google AI Studio y pegá una nueva.
 
 ## Estructura del proyecto
 
 ```
 app.py                  # punto de entrada (ventana principal)
-config/                 # API key y preferencias (%APPDATA%/SistemaNotas)
-pdf_processing/         # carga de PDF y conversión a imágenes (PyMuPDF)
+config/                 # API key y preferencias (%APPDATA%\SistemaNotas)
+pdf_processing/         # carga de PDF y render perezoso de páginas (PyMuPDF)
 vision/                 # lectura de planillas con Gemini
-excel/                  # generación del Excel (openpyxl)
-gui/                    # interfaz (CustomTkinter): pantallas y proceso en segundo plano
-tests/                  # test del generador de Excel
+excel/                  # generación del Excel (openpyxl) y agrupación compartida
+gui/                    # interfaz (CustomTkinter): pantallas y worker en segundo plano
+tests/                  # tests del pipeline completo y de cada capa
 requirements.txt
 build_exe.md            # instrucciones para crear el .exe
 ```
-
-## Registro de errores
-
-Si algo sale mal, la app guarda un registro en
-`%APPDATA%\SistemaNotas\log.txt` para ayudar a diagnosticar el problema.

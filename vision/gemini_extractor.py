@@ -72,6 +72,22 @@ def _cliente(api_key: str) -> genai.Client:
     )
 
 
+def _imagen_de(pag):
+    """
+    Devuelve la imagen PIL de una página, tolerando los dos formatos.
+
+    Las páginas nuevas de `pdf_loader.cargar_paginas` (S7) NO traen la imagen
+    materializada: exponen `_render`, un callable que rasteriza ESA página
+    recién cuando se lo llama. Los fixtures/tests legacy traen la imagen ya
+    materializada en la clave "imagen". El PDF nunca contiene "imagen" desde
+    pdf_loader: se verifica acá que el render lazy sea el camino normal.
+    """
+    render = pag.get("_render") if isinstance(pag, dict) else None
+    if callable(render):
+        return render()
+    return pag["imagen"]
+
+
 def _rango_grupo_valido(grupo: str) -> bool:
     """
     Formato esperado: 4 dígitos, primero 0, segundo 1-5 (grados 0 a 5),
@@ -382,6 +398,15 @@ def extraer_planilla_pagina(
         if intento < INTENTOS_MAX:
             time.sleep(ESPERA_BASE_SEG * intento)
 
+    # S12: si la usuaria canceló DURANTE la última llamada (o durante la espera
+    # del último reintento), el chequeo del inicio del loop ya no volverá a
+    # correr y el loop terminaría elevando un VisionError en vez de la
+    # cancelación limpia. Este chequeo final propaga el _Cancelado del worker
+    # (que NO es VisionError ni _PlanillaParseError), y la GUI muestra la
+    # cancelación en vez de "No se pudo leer...".
+    if progreso_cb:
+        progreso_cb(None)
+
     app_config.escribir_log(f"Error de visión en {pagina_label}: {ultimo_error}")
     raise VisionError(
         "No se pudo leer la planilla. Revisá tu conexión a internet y que la clave "
@@ -427,9 +452,12 @@ def extraer_planilla_pdf(
             # Valor = i/total (fracción 0..1) para actualizar la barra real
             # (S1): cada página procesada mueve el progreso, no sólo la primera.
             progreso_cb(f"Leyendo planilla {i} de {total}...", i / total)
+        # S7: la imagen de la página se rasteriza acá (carga perezosa) y se
+        # cierra apenas se termina de procesar, liberando el buffer por página.
+        imagen = _imagen_de(pag)
         try:
             planilla = extraer_planilla_pagina(
-                pag["imagen"],
+                imagen,
                 api_key=api_key,
                 modelo=modelo,
                 pagina_label=f"planilla {i} de {total}",
@@ -441,6 +469,12 @@ def extraer_planilla_pdf(
             app_config.escribir_log(f"No se pudo leer la planilla {i} de {total}: {e!r}")
             fallidas.append({"pagina": i, "total": total, "tipo": tipo})
             continue
+        finally:
+            # Liberar la imagen de ESTA página (el render lazy crea una nueva
+            # por llamada). Tolerante a imagenes legacy sin close().
+            cerrar = getattr(imagen, "close", None)
+            if callable(cerrar):
+                cerrar()
         planillas.append(planilla)
         if por_pagina_cb:
             por_pagina_cb(i, planilla)

@@ -68,24 +68,30 @@ class ProcesadorEnSegundoPlano:
                     msg["valor"] = valor
                 self.cola.put(msg)
 
-            planillas, fallidas = gemini_extractor.extraer_planilla_pdf(
-                paginas,
-                api_key=api_key,
-                modelo=modelo,
-                progreso_cb=_progreso,
-            )
+            try:
+                planillas, fallidas = gemini_extractor.extraer_planilla_pdf(
+                    paginas,
+                    api_key=api_key,
+                    modelo=modelo,
+                    progreso_cb=_progreso,
+                )
 
-            if self.cancelado:
-                raise _Cancelado()
+                if self.cancelado:
+                    raise _Cancelado()
 
-            self.cola.put(
-                {
-                    "tipo": MSG_RESULTADO,
-                    "planillas": planillas,
-                    "paginas_total": total,
-                    "fallidas": fallidas,
-                }
-            )
+                self.cola.put(
+                    {
+                        "tipo": MSG_RESULTADO,
+                        "planillas": planillas,
+                        "paginas_total": total,
+                        "fallidas": fallidas,
+                    }
+                )
+            finally:
+                # S7: el PDF quedó abierto para el render lazy de las páginas;
+                # se cierra SIEMPRE, aun si hubo error o cancelación, para no
+                # quedar con el archivo tomado.
+                pdf_loader.cerrar_paginas(paginas)
         except _Cancelado:
             # La cancelación NO es un error: se informa como un estado propio
             # (W4) para que la GUI lo muestre de forma amigable.

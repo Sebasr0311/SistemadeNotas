@@ -53,15 +53,23 @@ def _dpi_sano(dpi: int) -> int:
 
 def cargar_paginas(ruta_pdf: str, dpi: int = DPI_POR_DEFECTO):
     """
-    Abre el PDF y devuelve una lista de páginas.
+    Abre el PDF y devuelve una lista de páginas SIN materializar las imágenes
+    (carga perezosa, S7): rasterizar las decenas de páginas de una planilla
+    anual a 250 DPI puede ocupar cientos de MB de RAM; acá cada página expone
+    `_render`, un callable que rasteriza ESA página recién cuando se pide.
 
     Cada página es un dict:
         {
-            "indice": int (0-based y 1-based),
-            "imagen": PIL.Image (imagen de la página a buena resolución),
+            "indice": int (1-based),
+            "ancho_px": int,   # dimensiones de la página (page.rect, barato)
             "alto_px": int,
-            "ancho_px": int,
+            "_render": callable() -> PIL.Image RGB de ESA página,
+            "_doc": fitz.Document interno (NO tocar salvo cerrar_paginas),
         }
+
+    IMPORTANTE: el documento queda ABIERTO mientras se renderizan páginas con
+    `_render`. Cuando el procesamiento termine (éxito, error o cancelación),
+    llamá a `cerrar_paginas(paginas)` para liberar el archivo.
 
     Lanza PdfError si el archivo no se puede leer.
     """
@@ -73,21 +81,27 @@ def cargar_paginas(ruta_pdf: str, dpi: int = DPI_POR_DEFECTO):
     try:
         doc = fitz.open(ruta_pdf)
         for i, page in enumerate(doc):
-            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-            datos = pix.tobytes("png")
-            # Convertir los bytes PNG a una imagen PIL para el cliente de Gemini.
-            from PIL import Image
-            import io
-            imagen = Image.open(io.BytesIO(datos)).convert("RGB")
+            ancho = int(round(page.rect.width))
+            alto = int(round(page.rect.height))
+
+            def _render(pagina=page, factor=zoom):
+                # Rasteriza UNA página a la resolución pedida y devuelve la
+                # imagen PIL RGB lista para el cliente de Gemini.
+                from PIL import Image
+                import io
+                pix = pagina.get_pixmap(matrix=fitz.Matrix(factor, factor), alpha=False)
+                datos = pix.tobytes("png")
+                return Image.open(io.BytesIO(datos)).convert("RGB")
+
             paginas.append(
                 {
                     "indice": i + 1,
-                    "imagen": imagen,
-                    "ancho_px": pix.width,
-                    "alto_px": pix.height,
+                    "ancho_px": ancho,
+                    "alto_px": alto,
+                    "_render": _render,
+                    "_doc": doc,
                 }
             )
-        doc.close()
     except PdfError:
         raise
     except fitz.FileDataError as e:
@@ -99,6 +113,36 @@ def cargar_paginas(ruta_pdf: str, dpi: int = DPI_POR_DEFECTO):
         raise PdfError("El PDF no tiene páginas para leer.")
 
     return paginas
+
+
+def cerrar_paginas(paginas) -> None:
+    """
+    Cierra el documento PDF interno de las páginas cargadas con cargar_paginas.
+
+    El doc queda abierto mientras se renderizan páginas con `_render` (PyMuPDF
+    necesita el documento para rasterizar); una vez terminado el procesamiento
+    (éxito, error o cancelación), se cierra acá para liberar los handles.
+
+    Idempotente: tolera None, listas vacías y dicts sin "_doc" (por ejemplo,
+    fixtures legacy de tests). Llamarla dos veces es seguro.
+    """
+    try:
+        for pag in paginas or []:
+            if not isinstance(pag, dict):
+                continue
+            doc = pag.get("_doc")
+            if doc is None:
+                continue
+            try:
+                doc.close()
+            except Exception:
+                pass
+            finally:
+                # Marcar como cerrado para que una segunda llamada no reintente.
+                pag["_doc"] = None
+    except Exception:
+        # Cerrar es un best-effort: nunca debe romper el flujo principal.
+        pass
 
 
 def contar_paginas(ruta_pdf: str) -> int:

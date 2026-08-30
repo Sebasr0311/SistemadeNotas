@@ -22,6 +22,7 @@ import customtkinter as ctk
 
 from config import app_config
 from excel import generar_excel_notas
+from excel.agrupacion import agrupar_por_curso, combinar_estudiantes
 from . import styles
 from .worker import ProcesadorEnSegundoPlano, MSG_PROGRESO, MSG_RESULTADO, MSG_ERROR, MSG_CANCELADO
 
@@ -35,7 +36,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         styles.configurar_tema()
-        self.title("Sistema de Digitalización de Planillas de Notas")
+        self.title(styles.NOMBRE_APP)
         self.geometry("860x640")
         self.minsize(720, 560)
         self._configurar_apariencia()
@@ -53,6 +54,33 @@ class App(ctk.CTk):
         self._pantalla_actual = None
 
         self._mostrar_inicio()
+
+        # S9: la X de la ventana pasa por acá. Antes, cerrar con el worker
+        # activo mataba el hilo daemon a mitad de proceso y la GUI podía
+        # programar afters sobre una ventana ya destruida.
+        self.protocol("WM_DELETE_WINDOW", self._al_cerrar)
+
+    def _al_cerrar(self):
+        """Cierra la ventana de forma segura (S9).
+
+        Si hay un procesamiento en curso, se pregunta ANTES de cancelar: la
+        usuaria decide si salir igual (se cancela el proceso) o quedarse.
+        """
+        worker_activo = (
+            self._worker is not None
+            and getattr(self._worker, "_hilo", None) is not None
+            and self._worker._hilo.is_alive()
+        )
+        if worker_activo:
+            confirma = messagebox.askyesno(
+                "¿Salir?",
+                "Hay un procesamiento en curso. ¿Querés salir igual? "
+                "El procesamiento se cancelará.",
+            )
+            if not confirma:
+                return
+            self._worker.cancelar()
+        self.destroy()
 
     def _configurar_apariencia(self):
         self.configure(fg_color=styles.COLOR_FONDO)
@@ -79,10 +107,16 @@ class App(ctk.CTk):
         pantalla = ctk.CTkFrame(self._contenedor, fg_color=styles.COLOR_FONDO)
 
         titulo = ctk.CTkLabel(
-            pantalla, text="¡Bienvenida a Notas Digital!",
+            pantalla, text="¡Bienvenida!",
             font=(styles.FUENTE, styles.TAM_TITULO, "bold"), text_color=styles.COLOR_TEXTO,
         )
-        titulo.pack(pady=(20, 8))
+        titulo.pack(pady=(20, 4))
+
+        ctk.CTkLabel(
+            pantalla, text=styles.NOMBRE_APP,
+            font=(styles.FUENTE, styles.TAM_SUBTITULO, "bold"),
+            text_color=styles.COLOR_TEXTO_SECUNDARIO,
+        ).pack(pady=(0, 8))
 
         intro = (
             "Para poder leer las notas escritas a mano de tus planillas, la app\n"
@@ -304,6 +338,13 @@ class App(ctk.CTk):
                     return
         except queue.Empty:
             pass
+        # S9: si la ventana ya fue destruida (la usuaria cerró con la X mientras
+        # el worker seguía), no programar más afters sobre widgets muertos.
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
         # Seguir revisando mientras el hilo siga vivo.
         if self._worker is not None and getattr(self._worker, "_hilo", None) is not None:
             self.after(80, self._revisar_cola_progreso)
@@ -354,31 +395,24 @@ class App(ctk.CTk):
 
         self._cambiar_pantalla(pantalla)
 
-    def _agrupar_por_curso(self):
-        """Devuelve dict curso -> lista de planillas (páginas)."""
-        por_curso = {}
-        orden = []
-        for p in self.planillas:
-            g = p["encabezado"].get("grupo") or "SIN CURSO"
-            if g not in por_curso:
-                por_curso[g] = []
-                orden.append(g)
-            por_curso[g].append(p)
-        return por_curso, orden
-
     def _render_cursos(self):
         # Limpiar el frame por si se vuelve a entrar.
         for w in self._frame_cursos.winfo_children():
             w.destroy()
 
-        por_curso, orden = self._agrupar_por_curso()
+        # S8: la agrupación por curso y la combinación de estudiantes viven en
+        # excel/agrupacion.py, la MISMA fuente de verdad que usa el generador
+        # de Excel: lo que se muestra acá es exactamente lo que se escribe.
+        # S11: combinar_estudiantes descarta estudiantes duplicados (páginas
+        # repetidas o solapadas) antes de mostrarlos.
+        por_curso, orden = agrupar_por_curso(self.planillas)
         self._editores = {}  # (curso, idx_fila, celda_idx) -> variable StringVar
         self._periodo_combos = {}  # curso -> CTkComboBox de corrección de periodo
 
         for curso in orden:
             paginas = por_curso[curso]
-            # Combinar estudiantes de páginas del mismo curso.
-            estudiantes = [est for pg in paginas for est in pg["estudiantes"]]
+            # Combinar estudiantes de páginas del mismo curso (con dedupe S11).
+            estudiantes = combinar_estudiantes(paginas)
             enc = paginas[0]["encabezado"]
 
             tarjeta = ctk.CTkFrame(
@@ -554,7 +588,7 @@ class App(ctk.CTk):
         el guard del generador (ValueError) atrapa el periodo inválido."""
         if not getattr(self, "_periodo_combos", None):
             return
-        por_curso, _ = self._agrupar_por_curso()
+        por_curso, _ = agrupar_por_curso(self.planillas)
         for curso, combo in self._periodo_combos.items():
             valor = (combo.get() or "").strip()
             if valor not in ("1", "2", "3", "4"):
@@ -566,10 +600,12 @@ class App(ctk.CTk):
 
     def _aplicar_ediciones(self):
         """Vuelca los valores editados de la pantalla de revisión a las planillas."""
-        por_curso, orden = self._agrupar_por_curso()
+        por_curso, orden = agrupar_por_curso(self.planillas)
         for curso in orden:
             paginas = por_curso[curso]
-            estudiantes = [est for pg in paginas for est in pg["estudiantes"]]
+            # El mismo combinar_estudiantes (con dedupe S11) que usó la
+            # pantalla: los índices de fila coinciden uno a uno.
+            estudiantes = combinar_estudiantes(paginas)
             for idx, est in enumerate(estudiantes):
                 if est.get("retirado"):
                     continue
