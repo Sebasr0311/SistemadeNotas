@@ -29,6 +29,29 @@ def _escribir_hoja(ws, planilla: dict):
         )
     n_ev_anteriores = periodo - 1
 
+    # --- Ancho de la zona de área de trabajo (spec v2: 1 a 16 notas) ---
+    # El ancho se adapta a la cantidad REAL de notas leídas (1 a 16), nunca
+    # deja afuera una nota leída. Si el encabezado declara n_area_trabajo y
+    # ese valor es mayor a lo observado, prevalece el declarado (celdas vacías
+    # al final) para reflejar la planilla física. Si no se declaró ni hay
+    # notas, se cae al comportamiento histórico: planilla tradicional de 2.
+    declarado_raw = enc.get("n_area_trabajo")
+    declarado = (
+        declarado_raw
+        if isinstance(declarado_raw, int) and not isinstance(declarado_raw, bool)
+        and 1 <= declarado_raw <= 16
+        else 0
+    )
+    longitudes = [
+        len(est.get("area_trabajo") or [])
+        for est in estudiantes
+    ]
+    observado = max(longitudes) if longitudes else 0
+    n_areas = max(declarado, observado)
+    if n_areas == 0:
+        # Sin declaración y sin ninguna nota: planillas tradicionales de 2 notas.
+        n_areas = 2
+
     bold = Font(bold=True)
     header_fill = PatternFill("solid", fgColor="D9E1F2")
     revisar_fill = PatternFill("solid", fgColor="FFF2CC")
@@ -57,7 +80,8 @@ def _escribir_hoja(ws, planilla: dict):
     cols = ["No.", "Nombre del Alumno"]
     for p in range(1, n_ev_anteriores + 1):
         cols.append(f"Def. Periodo {p}")
-    cols += ["Área Trabajo 1", "Área Trabajo 2", f"Definitiva Periodo {periodo}"]
+    cols += [f"Área Trabajo {k}" for k in range(1, n_areas + 1)]
+    cols.append(f"Definitiva Periodo {periodo}")
     incluir_anual = periodo == 4 and n_ev_anteriores == 3
     if incluir_anual:
         cols.append("Definitiva Anual")
@@ -71,8 +95,7 @@ def _escribir_hoja(ws, planilla: dict):
 
     col_ev_start = 3
     col_at1 = col_ev_start + n_ev_anteriores
-    col_at2 = col_at1 + 1
-    col_def = col_at2 + 1
+    col_def = col_at1 + n_areas
     col_anual = col_def + 1 if incluir_anual else None
 
     r = header_row + 1
@@ -94,21 +117,20 @@ def _escribir_hoja(ws, planilla: dict):
             ws.cell(row=r, column=col_ev_start + k).alignment = center
 
         at = est.get("area_trabajo")
-        revisar = est.get("revisar") or [False, False]
-        c1 = ws.cell(row=r, column=col_at1, value=(at[0] if at and len(at) > 0 else None))
-        c2 = ws.cell(row=r, column=col_at2, value=(at[1] if at and len(at) > 1 else None))
-        c1.border = border; c1.alignment = center
-        c2.border = border; c2.alignment = center
-        if revisar[0]:
-            c1.fill = revisar_fill
-        if len(revisar) > 1 and revisar[1]:
-            c2.fill = revisar_fill
+        revisar = est.get("revisar") or []
+        for k in range(n_areas):
+            v = at[k] if at and k < len(at) else None
+            c = ws.cell(row=r, column=col_at1 + k, value=v)
+            c.border = border
+            c.alignment = center
+            if k < len(revisar) and revisar[k]:
+                c.fill = revisar_fill
 
         at1_ref = f"{get_column_letter(col_at1)}{r}"
-        at2_ref = f"{get_column_letter(col_at2)}{r}"
+        atN_ref = f"{get_column_letter(col_def - 1)}{r}"
         cdef = ws.cell(row=r, column=col_def)
         if at and len(at) >= 1:
-            cdef.value = f"=IFERROR(AVERAGE({at1_ref}:{at2_ref}),\"\")"
+            cdef.value = f"=IFERROR(AVERAGE({at1_ref}:{atN_ref}),\"\")"
         cdef.border = border; cdef.alignment = center
         cdef.font = bold
 

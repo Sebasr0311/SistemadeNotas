@@ -16,9 +16,9 @@ Salida esperada por página (la MISMA forma que espera `generar_excel_asignatura
             {
                 "no": int, "nombre": str,
                 "ev_anteriores": [float|None, ...],
-                "area_trabajo": [float|None, float|None],
+                "area_trabajo": [float|None, ...],  # 1 a MAX_N_AREAS notas
                 "retirado": bool,
-                "revisar": [bool, bool],
+                "revisar": [bool, ...],  # alineado a len(area_trabajo)
             }, ...
         ],
     }
@@ -55,6 +55,12 @@ RANGO_NOTA = (0, 100)
 MIN_ESTUDIANTES_SANOS = 10
 MAX_ESTUDIANTES_SANOS = 60
 
+# Cantidad máxima de notas de "área de trabajo" por alumno (spec v2): el rango
+# válido es de 1 a 16 notas por alumno. Debajo se trunca a este tope de
+# seguridad; la validación de planilla es la que se encarga de chequear la
+# consistencia con n_area_trabajo.
+MAX_N_AREAS = 16
+
 
 class VisionError(Exception):
     """Error de visión con mensaje amigable para la usuaria."""
@@ -68,13 +74,15 @@ class _PlanillaParseError(VisionError):
 def _cliente(api_key: str) -> genai.Client:
     if not api_key:
         raise VisionError("Falta la clave de Google AI. Cerra la app y configurala de nuevo.")
-    # Timeout de 60 s (60000 ms) para que una conexión colgada no bloquee el
-    # hilo para siempre y que Cancelar siga siendo útil. (Verificado por
-    # introspección: google-genai 2.20.0 acepta
+    # Timeout de 120 s (120000 ms): el log muestra "The read operation timed
+    # out" en planillas reales a 60 s incluso con flash-lite + dpi 200; 120 s
+    # da margen real sin dejar el hilo colgado (una conexión muerta igualmente
+    # se corta y Cancelar sigue siendo útil). (Verificado por introspección:
+    # google-genai 2.20.0 acepta
     # Client(..., http_options=types.HttpOptions(timeout=<ms>)).)
     return genai.Client(
         api_key=api_key,
-        http_options=types.HttpOptions(timeout=60000),
+        http_options=types.HttpOptions(timeout=120000),
     )
 
 
@@ -181,19 +189,28 @@ def _numero_plausible(valor):
 
 def _normalizar_area(valores, revisar_flags):
     """
-    Devuelve (area_trabajo, revisar) con exactamente 2 celdas.
-    - Celdas en blanco -> None.
+    Devuelve (area_trabajo, revisar) con TANTAS celdas como valores traiga el
+    modelo (hasta MAX_N_AREAS = 16, el rango válido del spec v2: de 1 a 16 notas
+    por alumno). Antes estaba hardcodeado a 2 celdas y TODA planilla salía con
+    exactamente 2 notas aunque el modelo leyera 5, 10 o 16.
+    - Celdas en blanco -> None (sin marcar revisión).
     - Valor ambiguo (dígitos separados) o no numérico -> None + marcar revisión.
     - Fuera de rango (no entre 0 y 100) -> marcar revisión True y dejar el valor.
     """
-    area = [None, None]
-    revisar = [bool(revisar_flags[0]), bool(revisar_flags[1]) if len(revisar_flags) > 1 else False]
     if not valores:
-        return area, revisar
-    for i in range(2):
-        v = valores[i] if i < len(valores) else None
+        return [], []
+    # Tope de seguridad: nunca más de MAX_N_AREAS celdas. La validación de la
+    # planilla (ver _normalizar_planilla) es la que cubre la consistencia con
+    # n_area_trabajo; acá sólo se acota por sanidad.
+    valores = valores[:MAX_N_AREAS]
+    revisar = [
+        bool(revisar_flags[i]) if i < len(revisar_flags) else False
+        for i in range(len(valores))
+    ]
+    area = []
+    for i, v in enumerate(valores):
         num, confiable = _numero_plausible(v)
-        area[i] = num
+        area.append(num)
         if not confiable and v not in (None, ""):
             revisar[i] = True
         if num is not None and not (RANGO_NOTA[0] <= num <= RANGO_NOTA[1]):
@@ -293,20 +310,28 @@ def _normalizar_planilla(datos: dict) -> dict:
                 "ev_anteriores": [],
                 "area_trabajo": None,
                 "retirado": True,
-                "revisar": [False, False],
+                "revisar": [],
                 "revisar_ev": False,
             })
             continue
 
         rev = est.get("revisar")
-        rev_flags = [False, False]
+        # LONGITUD DINÁMICA: los flags del modelo se alinean a la cantidad de
+        # áreas que trae el modelo en area_trabajo (hasta MAX_N_AREAS), no a un
+        # fijo de 2. Si el modelo no trae "revisar", quedan todos False y sólo
+        # actúa la heurística de _normalizar_area.
+        at_modelo = est.get("area_trabajo")
+        n_at = len(at_modelo) if isinstance(at_modelo, list) else 0
+        rev_flags = [False] * n_at
         if isinstance(rev, list):
-            for i in range(2):
+            for i in range(n_at):
                 val = rev[i] if i < len(rev) else None
                 r, conf = _coercion_bool(val)
                 rev_flags[i] = r if conf else True
         elif isinstance(rev, (int, float)) and not isinstance(rev, bool):
-            rev_flags = [rev == 1, False]
+            # Flag escalar (valor único): se aplica a la primera celda, el resto
+            # queda sin revisar, con la MISMA longitud dinámica.
+            rev_flags = ([rev == 1] + [False] * (n_at - 1)) if n_at > 0 else []
 
         area, revisar = _normalizar_area(est.get("area_trabajo"), rev_flags)
         ev, revisar_ev = _normalizar_ev(est.get("ev_anteriores"), n_ev_anteriores)
@@ -560,6 +585,10 @@ JSON válido (sin texto adicional, sin marcas de código), con esta estructura:
   ]
 }
 
+NOTA: el ejemplo muestra 2 áreas, pero el número REAL de valores de
+"area_trabajo" (y de "revisar") varía con la planilla: pueden ser de 1 a 16.
+Lee SIEMPRE la cantidad real de columnas, nunca fijes el tamaño.
+
 REGLAS IMPORTANTES:
 
 1. ENCABEZADO:
@@ -571,15 +600,18 @@ REGLAS IMPORTANTES:
 2. TABLA DE ESTUDIANTES:
    - "ev_anteriores" son las notas definitivas de periodos anteriores (una por cada
      columna que aparezca; si hay 2 columnas van 2 valores, si hay 3 van 3).
-   - "area_trabajo" son EXACTAMENTE 2 valores: las dos notas manuscritas del periodo
-     actual. Si una celda está en blanco, pon null en esa posición.
+   - "area_trabajo" son las notas manuscritas del periodo actual, UNA por cada
+     columna de área que aparezca en la planilla (de 1 a 16 valores, NUNCA fijes
+     la cantidad: leé exactamente cuántas columnas hay). Si una celda está en
+     blanco, pon null en esa posición.
    - IGNORA por completo las columnas tituladas "Min" y "Fls.": no las leas.
    - Si una fila está marcada con asteriscos (****) o dice "retirado", pon
      "retirado": true, "area_trabajo": null y "ev_anteriores": [].
    - Si una celda está en blanco o tachada sin valor claro, devolvé null (nunca 0).
    - Si una nota fue corregida (tachada y reescrita), devolvé el valor VIGENTE
      (el reescrito), no el tachado.
-   - "revisar" es un arreglo de 2 booleanos, uno por cada celda de "area_trabajo".
+   - "revisar" es un arreglo de booleanos, uno por cada celda de "area_trabajo"
+     (la MISMA cantidad de valores).
      Si NO estás completamente seguro de un dígito (letra ambigua, tachón difícil,
      mancha), poné true en esa posición de "revisar" (y null en el valor si no podés
      leerlo). Si estás seguro, pon false. Nunca inventes un valor dudoso para evitar
