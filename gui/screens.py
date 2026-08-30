@@ -479,6 +479,19 @@ class App(ctk.CTk):
                     text_color="#B8860B", wraplength=620, anchor="w",
                 ).pack(anchor="w", padx=14, pady=(0, 6))
 
+            # Spec v2: aviso si alguna planilla del curso quedó marcada para
+            # revisión manual (cantidad de notas o de alumnos no coincide con lo
+            # esperado). No bloquea el flujo: la usuaria verifica contra el papel
+            # y puede generar el Excel igual.
+            if any(p.get("revisar_planilla") for p in paginas):
+                ctk.CTkLabel(
+                    tarjeta,
+                    text=f"Curso {curso} requiere revisión manual: la cantidad de notas "
+                         "o de alumnos no coincide. Verificá contra la planilla física.",
+                    font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
+                    text_color="#C0392B", wraplength=620, anchor="w",
+                ).pack(anchor="w", padx=14, pady=(0, 6))
+
             # Encabezados de columnas.
             cabecera = ctk.CTkFrame(tarjeta, fg_color="#EDF2FB", corner_radius=8)
             cabecera.pack(fill="x", padx=10)

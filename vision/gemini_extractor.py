@@ -49,6 +49,12 @@ ESPERA_BASE_SEG = 2.0
 # Rango razonable para una nota (0 a 100). Fuera de rango -> revisión.
 RANGO_NOTA = (0, 100)
 
+# Sanidad de la cantidad de alumnos por planilla (spec v2): el spec pedía
+# 40-50; se usan límites generosos para no dar falsas alarmas con cursos
+# chicos o planillas con más alumnos de lo habitual.
+MIN_ESTUDIANTES_SANOS = 10
+MAX_ESTUDIANTES_SANOS = 60
+
 
 class VisionError(Exception):
     """Error de visión con mensaje amigable para la usuaria."""
@@ -222,6 +228,24 @@ def _normalizar_planilla(datos: dict) -> dict:
     """
     enc_raw = datos.get("encabezado") or {}
 
+    # n_area_trabajo declarado en el encabezado (spec v2): cuántas columnas de
+    # área de trabajo dice la planilla que hay. Si viene y no coincide con la
+    # cantidad de notas leídas, la planilla completa se marca para revisión
+    # manual (NUNCA se descarta). Un valor que no se puede interpretar (o un
+    # bool, que no es un conteo) se ignora: el flag queda en manos de la
+    # heurística de cantidad de alumnos.
+    n_at_raw = enc_raw.get("n_area_trabajo")
+    n_area_declarado = None
+    if isinstance(n_at_raw, bool):
+        n_area_declarado = None
+    elif isinstance(n_at_raw, (int, float)):
+        n_area_declarado = int(n_at_raw)
+    elif isinstance(n_at_raw, str):
+        try:
+            n_area_declarado = int(float(n_at_raw.strip()))
+        except (ValueError, TypeError):
+            n_area_declarado = None
+
     # Periodo parseado de forma tolerante (W2) y SIN corregir silenciosamente:
     # un periodo fuera de rango (ej. 9) ya no se transforma a 1 (W1).
     periodo, periodo_ok = _parsear_periodo(enc_raw.get("periodo"))
@@ -297,7 +321,30 @@ def _normalizar_planilla(datos: dict) -> dict:
             "revisar_ev": revisar_ev,
         })
 
-    return {"encabezado": encabezado, "estudiantes": estudiantes}
+    # Validación fuerte de la planilla (spec v2): si algo no cierra, la
+    # planilla se MARCA para revisión manual pero sigue en `planillas` — nunca
+    # se descarta ni pasa a `fallidas`. La pantalla de revisión avisa y la
+    # usuaria verifica contra la planilla física.
+    revisar_planilla = False
+    # 1) Cantidad de notas: si el encabezado declara n_area_trabajo y algún
+    #    estudiante no retirado trae otra cantidad de notas -> revisión manual.
+    if n_area_declarado is not None:
+        for e in estudiantes:
+            if e.get("retirado"):
+                continue
+            if len(e.get("area_trabajo") or []) != n_area_declarado:
+                revisar_planilla = True
+                break
+    # 2) Cantidad de alumnos no retirados fuera del rango sano -> revisión.
+    activos = [e for e in estudiantes if not e.get("retirado")]
+    if not (MIN_ESTUDIANTES_SANOS <= len(activos) <= MAX_ESTUDIANTES_SANOS):
+        revisar_planilla = True
+
+    return {
+        "encabezado": encabezado,
+        "estudiantes": estudiantes,
+        "revisar_planilla": revisar_planilla,
+    }
 
 
 def _fila_retirada(est: dict) -> bool:
@@ -533,9 +580,10 @@ REGLAS IMPORTANTES:
    - Si una nota fue corregida (tachada y reescrita), devolvé el valor VIGENTE
      (el reescrito), no el tachado.
    - "revisar" es un arreglo de 2 booleanos, uno por cada celda de "area_trabajo".
-     Pon true en la posición de una celda cuyo valor NO estés seguro de haber leído
-     bien (letra ambigua, tachón difícil, mancha, número raro). Si estás seguro,
-     pon false. Nunca inventes un valor dudoso para evitar la revisión.
+     Si NO estás completamente seguro de un dígito (letra ambigua, tachón difícil,
+     mancha), poné true en esa posición de "revisar" (y null en el valor si no podés
+     leerlo). Si estás seguro, pon false. Nunca inventes un valor dudoso para evitar
+     la revisión.
    - Las notas suelen ser números enteros o decimales (ej. 45, 40, 4.5, 50). Devolvé
      el número tal cual aparece en la planilla, sin cambiar su escala.
    - Si un número está escrito con los dígitos muy separados (ej. "4 5") NO lo
