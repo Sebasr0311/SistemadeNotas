@@ -1,0 +1,7 @@
+# Archivos y carpetas generados / temporales
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.spec
