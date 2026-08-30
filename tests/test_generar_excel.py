@@ -102,5 +102,57 @@ class TestGeneradorExcel(unittest.TestCase):
         self.assertTrue(hay_formula, "No se encontró ninguna fórmula de definitiva en Curso 0302")
 
 
+class TestGuardPeriodo(unittest.TestCase):
+    """W-A: el generador debe abortar con ValueError ante un periodo inválido
+    en lugar de producir un Excel corrupto (que pisa el nombre del alumno)."""
+
+    def _dir(self):
+        return tempfile.mkdtemp(prefix="notas_periodo_")
+
+    def _pl(self, periodo):
+        pl = _planilla("0302", 3)
+        pl["encabezado"]["periodo"] = periodo
+        return pl
+
+    def test_periodo_cero_lanza_valorerror_asignatura(self):
+        with self.assertRaises(ValueError) as cm:
+            excel.generar_excel_notas.generar_excel_asignatura(
+                [self._pl(0)], os.path.join(self._dir(), "a.xlsx")
+            )
+        self.assertIn("debe ser 1, 2, 3 o 4", str(cm.exception))
+
+    def test_periodo_cinco_lanza_valorerror_asignatura(self):
+        with self.assertRaises(ValueError) as cm:
+            excel.generar_excel_notas.generar_excel_asignatura(
+                [self._pl(5)], os.path.join(self._dir(), "a.xlsx")
+            )
+        self.assertIn("debe ser 1, 2, 3 o 4", str(cm.exception))
+
+    def test_periodo_invalido_no_crea_archivo_asignatura(self):
+        ruta = os.path.join(self._dir(), "no_debe_existir.xlsx")
+        with self.assertRaises(ValueError):
+            excel.generar_excel_notas.generar_excel_asignatura([self._pl(0)], ruta)
+        self.assertFalse(os.path.exists(ruta), "No debería haberse creado el archivo")
+
+    def test_periodo_invalido_lanza_valorerror_planilla(self):
+        with self.assertRaises(ValueError):
+            excel.generar_excel_notas.generar_excel_planilla(
+                self._pl(0), os.path.join(self._dir(), "b.xlsx")
+            )
+
+    def test_periodos_validos_1_a_4_ok_asignatura(self):
+        for p in (1, 2, 3, 4):
+            ruta = os.path.join(self._dir(), f"ok_{p}.xlsx")
+            excel.generar_excel_notas.generar_excel_asignatura([self._pl(p)], ruta)
+            self.assertTrue(os.path.exists(ruta), f"Fallo el periodo válido {p}")
+
+    def test_mensaje_valorerror_nombra_el_curso(self):
+        with self.assertRaises(ValueError) as cm:
+            excel.generar_excel_notas.generar_excel_asignatura(
+                [self._pl(0)], os.path.join(self._dir(), "c.xlsx")
+            )
+        self.assertIn("0302", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

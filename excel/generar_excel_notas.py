@@ -19,6 +19,14 @@ def _escribir_hoja(ws, planilla: dict):
     enc = planilla["encabezado"]
     estudiantes = planilla["estudiantes"]
     periodo = enc["periodo"]
+    # Guard W1/W-A: nunca generar un Excel corrupto con un periodo inválido.
+    # Si llega mal desde cualquier fuente (visión, edición manual, etc.), se
+    # aborta en vez de que la nota pise la columna del nombre.
+    if not (isinstance(periodo, int) and 1 <= periodo <= 4):
+        raise ValueError(
+            f"Periodo inválido ({periodo!r}) en el curso {enc.get('grupo', '?')}: "
+            "debe ser 1, 2, 3 o 4."
+        )
     n_ev_anteriores = periodo - 1
 
     bold = Font(bold=True)

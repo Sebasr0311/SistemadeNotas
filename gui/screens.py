@@ -356,6 +356,7 @@ class App(ctk.CTk):
 
         por_curso, orden = self._agrupar_por_curso()
         self._editores = {}  # (curso, idx_fila, celda_idx) -> variable StringVar
+        self._periodo_combos = {}  # curso -> CTkComboBox de corrección de periodo
 
         for curso in orden:
             paginas = por_curso[curso]
@@ -389,6 +390,24 @@ class App(ctk.CTk):
                     font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
                     text_color="#C0392B", wraplength=620, anchor="w",
                 ).pack(anchor="w", padx=14, pady=(0, 6))
+
+            # W-A Part 2: si el periodo llegó inválido, ofrecer corregirlo acá
+            # mismo, en la pantalla de revisión (antes no había forma de hacerlo).
+            if enc.get("periodo_erroneo"):
+                fila_periodo = ctk.CTkFrame(tarjeta, fg_color="transparent")
+                fila_periodo.pack(anchor="w", padx=14, pady=(0, 6))
+                ctk.CTkLabel(
+                    fila_periodo, text="Elegí el periodo correcto:",
+                    font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
+                    text_color=styles.COLOR_TEXTO, anchor="w",
+                ).pack(side="left", padx=(0, 8))
+                combo = ctk.CTkComboBox(
+                    fila_periodo, values=["1", "2", "3", "4"], width=90,
+                    state="normal",
+                    font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
+                )
+                combo.pack(side="left")
+                self._periodo_combos[curso] = combo
 
             sub = f"{enc.get('asignatura','')}  •  {enc.get('docente','')}"
             ctk.CTkLabel(
@@ -452,6 +471,7 @@ class App(ctk.CTk):
 
     def _generar_excel(self):
         # Aplicar las correcciones manuales de la pantalla de revisión.
+        self._aplicar_periodo_seleccionado()
         self._aplicar_ediciones()
 
         # Elegir dónde guardar (el diálogo pregunta antes de sobrescribir).
@@ -465,10 +485,26 @@ class App(ctk.CTk):
         if not ruta:
             return  # la usuaria canceló
 
-        app_config.set_output_dir(os.path.dirname(ruta))
+        # W-B: guardar la carpeta de preferencia es accesorio, NUNCA debe
+        # abortar la generación del Excel. Si falla la config, seguimos igual
+        # con la ruta elegida.
+        try:
+            app_config.set_output_dir(os.path.dirname(ruta))
+        except Exception as e:
+            app_config.escribir_log(f"No se pudo guardar la carpeta de salida: {e!r}")
 
         try:
             generar_excel_notas.generar_excel_asignatura(self.planillas, ruta)
+        except ValueError as e:
+            # W-A Part 1: periodo inválido detectado por el generador (guard).
+            # Mensaje amigable nombrando el curso, sin traceback.
+            app_config.escribir_log(f"Error generando el Excel: {e!r}")
+            messagebox.showerror(
+                "Periodo inválido",
+                str(e) + "\n\nElegí el periodo correcto en la pantalla de "
+                "revisión y volvé a generar.",
+            )
+            return
         except Exception as e:
             app_config.escribir_log(f"Error generando el Excel: {e!r}")
             messagebox.showerror(
@@ -480,6 +516,23 @@ class App(ctk.CTk):
 
         self.archivo_final = ruta
         self.mostrar_final()
+
+    def _aplicar_periodo_seleccionado(self):
+        """W-A Part 2: vuelca el periodo elegido en los combobox de revisión a
+        las planillas. Si la usuaria eligió un valor válido, se corrige el
+        periodo y se quita el flag de error; si no eligió nada, se deja igual y
+        el guard del generador (ValueError) atrapa el periodo inválido."""
+        if not getattr(self, "_periodo_combos", None):
+            return
+        por_curso, _ = self._agrupar_por_curso()
+        for curso, combo in self._periodo_combos.items():
+            valor = (combo.get() or "").strip()
+            if valor not in ("1", "2", "3", "4"):
+                continue  # sin elección válida: lo atrapa el guard del generador
+            for p in por_curso.get(curso, []):
+                enc = p["encabezado"]
+                enc["periodo"] = int(valor)
+                enc.pop("periodo_erroneo", None)
 
     def _aplicar_ediciones(self):
         """Vuelca los valores editados de la pantalla de revisión a las planillas."""

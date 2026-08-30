@@ -334,6 +334,11 @@ def extraer_planilla_pagina(
             except Exception as e:
                 # El modelo devolvió algo que no se pudo interpretar: es un
                 # error de PARSEO (W2), no de red/API; no se reintenta.
+                # W-C: dejar rastro en el log para diagnóstico (antes el log
+                # quedaba mudo ante este tipo de falla).
+                app_config.escribir_log(
+                    f"Error de parseo en {pagina_label or 'planilla'}: {e!r}"
+                )
                 raise _PlanillaParseError(
                     "No se pudo interpretar el contenido de la planilla."
                 ) from e
