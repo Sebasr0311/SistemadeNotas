@@ -108,9 +108,11 @@ class TestAgruparPorCurso(unittest.TestCase):
     def test_orden_de_primera_aparicion(self):
         ps = [self._planilla("0302"), self._planilla("0201"), self._planilla("0302")]
         por_curso, orden = agrupar_por_curso(ps)
-        self.assertEqual(orden, ["0302", "0201"])
-        self.assertEqual(len(por_curso["0302"]), 2)
-        self.assertEqual(len(por_curso["0201"]), 1)
+        # Las claves ahora son tuplas (grupo, asignatura); sin asignatura, el
+        # fallback es "SIN ASIGNATURA".
+        self.assertEqual(orden, [("0302", "SIN ASIGNATURA"), ("0201", "SIN ASIGNATURA")])
+        self.assertEqual(len(por_curso[("0302", "SIN ASIGNATURA")]), 2)
+        self.assertEqual(len(por_curso[("0201", "SIN ASIGNATURA")]), 1)
 
     def test_grupo_vacio_o_ausente_va_a_sin_curso(self):
         ps = [
@@ -118,8 +120,8 @@ class TestAgruparPorCurso(unittest.TestCase):
             {"encabezado": {}, "estudiantes": []},
         ]
         por_curso, orden = agrupar_por_curso(ps)
-        self.assertEqual(orden, ["SIN CURSO"])
-        self.assertEqual(len(por_curso["SIN CURSO"]), 2)
+        self.assertEqual(orden, [("SIN CURSO", "SIN ASIGNATURA")])
+        self.assertEqual(len(por_curso[("SIN CURSO", "SIN ASIGNATURA")]), 2)
 
     def test_no_muta_las_planillas(self):
         ps = [self._planilla("0302")]
@@ -258,9 +260,12 @@ class TestPipelineS15(unittest.TestCase):
 
             import openpyxl
             wb = openpyxl.load_workbook(ruta_xlsx)
-            self.assertEqual(wb.sheetnames, ["Curso 0201", "Curso 0302"])
+            self.assertEqual(
+                wb.sheetnames,
+                ["Curso 0201 - MATEMATICAS", "Curso 0302 - MATEMATICAS"],
+            )
 
-            ws = wb["Curso 0302"]
+            ws = wb["Curso 0302 - MATEMATICAS"]
             # Filas de alumnos = col A (no) y col B (nombre) pobladas; la fila
             # del legendario "Amarillo = ..." tiene col A vacía y no cuenta.
             nombres = [

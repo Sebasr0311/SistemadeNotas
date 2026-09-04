@@ -22,7 +22,8 @@ import customtkinter as ctk
 
 from config import app_config
 from excel import generar_excel_notas
-from excel.agrupacion import agrupar_por_curso, combinar_estudiantes
+from excel.agrupacion import agrupar_por_curso, combinar_estudiantes, _asignatura_limpia
+from pdf_processing import pdf_loader
 from . import styles
 from .worker import ProcesadorEnSegundoPlano, MSG_PROGRESO, MSG_RESULTADO, MSG_ERROR, MSG_CANCELADO
 
@@ -246,6 +247,23 @@ class App(ctk.CTk):
         )
         if not ruta:
             return
+        # Validación temprana: contar las páginas (planillas) del PDF es barato
+        # y evita arrancar el procesamiento con un PDF ilegible o demasiado
+        # grande para la cuota gratuita de la API.
+        try:
+            n = pdf_loader.contar_paginas(ruta)
+        except pdf_loader.PdfError as e:
+            messagebox.showerror("No se pudo leer el PDF", str(e))
+            return
+        if n > pdf_loader.MAX_PLANILLAS_POR_PDF:
+            messagebox.showinfo(
+                "Demasiadas planillas",
+                f"Este PDF tiene {n} planillas. Por ahora la app procesa hasta 10 "
+                "planillas por PDF para no saturar el servicio de lectura. Dividí "
+                "el PDF en partes de máximo 10 planillas cada una y subilas por "
+                "separado.",
+            )
+            return
         self.mostrar_progreso(ruta)
 
     # ------------------------------------------------------------------ #
@@ -409,11 +427,23 @@ class App(ctk.CTk):
         self._editores = {}  # (curso, idx_fila, celda_idx) -> variable StringVar
         self._periodo_combos = {}  # curso -> CTkComboBox de corrección de periodo
 
-        for curso in orden:
-            paginas = por_curso[curso]
+        for clave in orden:
+            # S8: cada clave es una tupla (grupo, asignatura): una tarjeta por
+            # asignatura+curso, para que asignaturas distintas de un mismo curso
+            # no se mezclen y no se pierdan notas.
+            grupo, _asignatura = clave
+            paginas = por_curso[clave]
             # Combinar estudiantes de páginas del mismo curso (con dedupe S11).
             estudiantes = combinar_estudiantes(paginas)
             enc = paginas[0]["encabezado"]
+
+            # Ancho REAL de la zona de área de trabajo (spec v2: 1 a 16 notas):
+            # se calcula con la MISMA fuente de verdad que usa el generador de
+            # Excel (S8) — lo que se muestra acá es exactamente lo que se escribe.
+            n_areas = generar_excel_notas.calcular_n_areas(enc, estudiantes)
+            # Achicar el ancho de las celdas para que entren hasta 16 columnas:
+            # 640//n_areas reparte el espacio horizontal disponible.
+            ancho_celda = max(48, min(100, 640 // n_areas))
 
             tarjeta = ctk.CTkFrame(
                 self._frame_cursos, fg_color=styles.COLOR_BLANCO, corner_radius=12,
@@ -421,7 +451,7 @@ class App(ctk.CTk):
             )
             tarjeta.pack(fill="x", pady=8, padx=4)
 
-            titulo = f"Curso {curso} — Periodo {enc.get('periodo')}"
+            titulo = f"Curso {grupo} — Periodo {enc.get('periodo')}"
             if enc.get("grupo_erroneo"):
                 titulo += "  ⚠ (curso no reconocido, verificá el número)"
             if enc.get("periodo_erroneo"):
@@ -458,7 +488,7 @@ class App(ctk.CTk):
                     font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
                 )
                 combo.pack(side="left")
-                self._periodo_combos[curso] = combo
+                self._periodo_combos[clave] = combo
 
             sub = f"{enc.get('asignatura','')}  •  {enc.get('docente','')}"
             ctk.CTkLabel(
@@ -486,7 +516,7 @@ class App(ctk.CTk):
             if any(p.get("revisar_planilla") for p in paginas):
                 ctk.CTkLabel(
                     tarjeta,
-                    text=f"Curso {curso} requiere revisión manual: la cantidad de notas "
+                    text=f"Curso {grupo} requiere revisión manual: la cantidad de notas "
                          "o de alumnos no coincide. Verificá contra la planilla física.",
                     font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
                     text_color="#C0392B", wraplength=620, anchor="w",
@@ -499,10 +529,9 @@ class App(ctk.CTk):
                          text_color=styles.COLOR_TEXTO, width=44).pack(side="left", padx=(10, 4), pady=6)
             ctk.CTkLabel(cabecera, text="Nombre del Alumno", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
                          text_color=styles.COLOR_TEXTO, width=280).pack(side="left", pady=6)
-            ctk.CTkLabel(cabecera, text="Área Trabajo 1", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
-                         text_color=styles.COLOR_TEXTO, width=110).pack(side="left", pady=6)
-            ctk.CTkLabel(cabecera, text="Área Trabajo 2", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
-                         text_color=styles.COLOR_TEXTO, width=110).pack(side="left", pady=6)
+            for k in range(1, n_areas + 1):
+                ctk.CTkLabel(cabecera, text=f"Área Trabajo {k}", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
+                             text_color=styles.COLOR_TEXTO, width=110).pack(side="left", pady=6)
 
             for idx, est in enumerate(estudiantes):
                 fila = ctk.CTkFrame(tarjeta, fg_color="transparent")
@@ -520,8 +549,8 @@ class App(ctk.CTk):
                     ).pack(side="left")
                     continue
 
-                at = est.get("area_trabajo") or [None, None]
-                rev = est.get("revisar") or [False, False]
+                at = est.get("area_trabajo") or []
+                rev = est.get("revisar") or []
 
                 ctk.CTkLabel(
                     fila, text=str(est.get("no", "")), font=(styles.FUENTE, styles.TAM_CELDA),
@@ -533,17 +562,18 @@ class App(ctk.CTk):
                     text_color=styles.COLOR_TEXTO, width=280, anchor="w",
                 ).pack(side="left")
 
-                for celda_idx in (0, 1):
-                    var = tk.StringVar(value=_fmt_celda(at[celda_idx]))
-                    self._editores[(curso, idx, celda_idx)] = var
-                    color_fondo = styles.COLOR_REVISAR if rev[celda_idx] else styles.COLOR_FONDO_SECUNDARIO
+                for k in range(n_areas):
+                    var = tk.StringVar(value=_fmt_celda(at[k] if at and k < len(at) else None))
+                    self._editores[(clave, idx, k)] = var
+                    flag_rev = rev[k] if rev and k < len(rev) else False
+                    color_fondo = styles.COLOR_REVISAR if flag_rev else styles.COLOR_FONDO_SECUNDARIO
                     entrada = ctk.CTkEntry(
-                        fila, textvariable=var, width=100, height=30,
+                        fila, textvariable=var, width=ancho_celda, height=30,
                         font=(styles.FUENTE, styles.TAM_CELDA),
                         fg_color=color_fondo,
-                        border_color=styles.COLOR_REVISAR_BORDE if rev[celda_idx] else "#D5DEEF",
+                        border_color=styles.COLOR_REVISAR_BORDE if flag_rev else "#D5DEEF",
                     )
-                    _clear_tooltip(entrada, rev[celda_idx])
+                    _clear_tooltip(entrada, flag_rev)
                     entrada.pack(side="left", padx=6, pady=3)
 
     def _generar_excel(self):
@@ -619,28 +649,39 @@ class App(ctk.CTk):
             # El mismo combinar_estudiantes (con dedupe S11) que usó la
             # pantalla: los índices de fila coinciden uno a uno.
             estudiantes = combinar_estudiantes(paginas)
+            enc = paginas[0]["encabezado"]
+            # Mismo cálculo que la pantalla de revisión y el generador (S8):
+            # el ancho de edición coincide con el ancho que se muestra/escribe.
+            n_areas = generar_excel_notas.calcular_n_areas(enc, estudiantes)
             for idx, est in enumerate(estudiantes):
                 if est.get("retirado"):
                     continue
-                area = est.get("area_trabajo") or [None, None]
-                revisar = est.get("revisar") or [False, False]
-                for celda_idx in (0, 1):
-                    var = self._editores.get((curso, idx, celda_idx))
+                area = list(est.get("area_trabajo") or [])
+                revisar = list(est.get("revisar") or [])
+                # Padding hasta el ancho calculado (celdas vacías al final). Si
+                # la lista fuera MÁS larga, no se trunca: se conserva todo y el
+                # generador decide su propio ancho (defensivo).
+                while len(area) < n_areas:
+                    area.append(None)
+                while len(revisar) < n_areas:
+                    revisar.append(False)
+                for k in range(n_areas):
+                    var = self._editores.get((curso, idx, k))
                     if var is None:
                         continue
                     valor_texto = (var.get() or "").strip()
-                    area[celda_idx] = _parse_celda(valor_texto)
+                    area[k] = _parse_celda(valor_texto)
                     # Si la usuaria borró o corrigió un valor dudoso, se quita el
                     # resaltado sólo cuando ya no es dudoso por rango.
                     if valor_texto:
                         try:
                             num = float(valor_texto.replace(",", "."))
                             if 0 <= num <= 100:
-                                revisar[celda_idx] = False
+                                revisar[k] = False
                         except ValueError:
                             pass
                     else:
-                        revisar[celda_idx] = False
+                        revisar[k] = False
                 est["area_trabajo"] = area
                 est["revisar"] = revisar
                 # S3: el flag de Ev. Anteriores se preserva tal cual al editarla;
@@ -648,6 +689,14 @@ class App(ctk.CTk):
                 est["revisar_ev"] = bool(est.get("revisar_ev"))
 
     def _nombre_archivo_sugerido(self):
+        # S8: si el PDF trae más de una asignatura distinta (normalizada), el
+        # nombre genérico evita atribuirle un solo nombre a varias planillas.
+        asignaturas = {
+            _asignatura_limpia(p.get("encabezado", {}).get("asignatura"))
+            for p in self.planillas
+        }
+        if len(asignaturas) > 1:
+            return "notas_planillas.xlsx"
         enc = self.planillas[0]["encabezado"] if self.planillas else {}
         base = (enc.get("asignatura") or "notas").split()
         asignatura = " ".join(base[:3]) if base else "notas"

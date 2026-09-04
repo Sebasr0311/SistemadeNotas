@@ -25,7 +25,11 @@ if _PROJECT_ROOT not in sys.path:
 
 import excel.generar_excel_notas  # noqa: E402,F401
 
-_HOJAS_ESPERADAS = ["Curso 0302", "Curso 0401", "Curso 0501"]
+_HOJAS_ESPERADAS = [
+    "Curso 0302 - MATEMATICAS",
+    "Curso 0401 - MATEMATICAS",
+    "Curso 0501 - MATEMATICAS",
+]
 
 
 def _planilla(grupo: str, periodo: int) -> dict:
@@ -93,13 +97,13 @@ class TestGeneradorExcel(unittest.TestCase):
         import openpyxl
 
         wb = openpyxl.load_workbook(self.ruta_xlsx)
-        ws = wb["Curso 0302"]
+        ws = wb["Curso 0302 - MATEMATICAS"]
         hay_formula = any(
             isinstance(cell.value, str) and cell.value.startswith("=IFERROR(AVERAGE")
             for row in ws.iter_rows()
             for cell in row
         )
-        self.assertTrue(hay_formula, "No se encontró ninguna fórmula de definitiva en Curso 0302")
+        self.assertTrue(hay_formula, "No se encontró ninguna fórmula de definitiva en Curso 0302 - MATEMATICAS")
 
 
 class TestGuardPeriodo(unittest.TestCase):

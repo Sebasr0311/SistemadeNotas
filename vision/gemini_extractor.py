@@ -41,8 +41,12 @@ from google.genai import types
 
 from config import app_config
 
-# El mejor modelo multimodal con buena relación calidad/precio hoy.
-MODELO_POR_DEFECTO = "gemini-3.7-flash"
+# Modelo por defecto: gemini-2.5-flash-lite tiene el nivel gratuito más
+# generoso y confiable de Gemini (sin tarjeta de crédito, ~1000-1500
+# solicitudes/día). "gemini-3.7-flash" es más potente pero NO tiene cuota
+# gratuita garantizada; se deja como opción para quien sí quiera pagar.
+MODELO_POR_DEFECTO = "gemini-2.5-flash-lite"
+MODELO_RESPALDO_PAGO = "gemini-3.7-flash"
 INTENTOS_MAX = 3
 ESPERA_BASE_SEG = 2.0
 
@@ -282,6 +286,11 @@ def _normalizar_planilla(datos: dict) -> dict:
         "asignatura": str(enc_raw.get("asignatura") or "").strip(),
         "docente": str(enc_raw.get("docente") or "").strip(),
         "periodo": periodo,
+        # S13: el declarado se CONSERVA en el encabezado (antes se usaba sólo
+        # para validar y se descartaba). Así calcular_n_areas de la GUI y del
+        # generador pueden preferir el conteo de columnas del encabezado sobre
+        # lo observado, y mostrar columnas con celdas vacías como corresponde.
+        "n_area_trabajo": n_area_declarado,
     }
     if not grupo_ok:
         encabezado["grupo_erroneo"] = True
@@ -571,7 +580,8 @@ JSON válido (sin texto adicional, sin marcas de código), con esta estructura:
     "grupo": "texto de 4 dígitos, ej. 0302",
     "asignatura": "texto",
     "docente": "texto",
-    "periodo": 3
+    "periodo": 3,
+    "n_area_trabajo": 4
   },
   "estudiantes": [
     {
@@ -596,6 +606,21 @@ REGLAS IMPORTANTES:
    - "grupo" es un número de 4 dígitos como "0302" (grado y grupo). Nunca inventes
      un grupo que no esté escrito.
    - "año_lectivo" suele ser un año (ej. "2026").
+   - El texto fijo "LISTA AUXILIAR DE CLASE" es el membrete impreso de la
+     planilla, NO un dato: ignoralo (no lo extraigas como institución, sede ni
+     en ningún otro campo).
+   - Los escaneos (por ejemplo de CamScanner) suelen cortar o inclinar el
+     margen izquierdo: etiquetas como "ASIGNATURA", "DOCENTE" o "AÑO LECTIVO"
+     pueden aparecer truncadas ("GNATURA", "CENTE", "O LECTIVO"). Inferí el
+     campo por su POSICIÓN en la tabla del encabezado (la fila/columna donde
+     siempre aparece), no solo por el texto literal. No dejes el campo vacío ni
+     falles por un rótulo parcialmente cortado: el valor de la celda a la
+     derecha del rótulo suele estar legible.
+   - "n_area_trabajo" es la cantidad de columnas "ÁREA DE TRABAJO"/"AREA DE
+     TRABAJO" impresas en el ENCABEZADO de la tabla (de 1 a 16). Contá las
+     columnas del encabezado, NO las celdas llenas: si la fila de títulos dice
+     ÁREA DE TRABAJO 1, 2, 3 y 4, devolvé 4 aunque en varios alumnos la última
+     celda esté en blanco (las planillas reales suelen dejar celdas vacías).
 
 2. TABLA DE ESTUDIANTES:
    - "ev_anteriores" son las notas definitivas de periodos anteriores (una por cada
@@ -603,10 +628,23 @@ REGLAS IMPORTANTES:
    - "area_trabajo" son las notas manuscritas del periodo actual, UNA por cada
      columna de área que aparezca en la planilla (de 1 a 16 valores, NUNCA fijes
      la cantidad: leé exactamente cuántas columnas hay). Si una celda está en
-     blanco, pon null en esa posición.
-   - IGNORA por completo las columnas tituladas "Min" y "Fls.": no las leas.
+     blanco, pon null en esa posición. ATENCIÓN: cada alumno debe traer
+     EXACTAMENTE n_area_trabajo valores: si el encabezado tiene 4 columnas, el
+     arreglo de cada alumno tiene 4 posiciones (las vacías van como null), aunque
+     ese alumno no tenga todas las notas.
+   - Nunca asumas que dos planillas del mismo curso y periodo tienen la misma
+     cantidad de columnas de Área de Trabajo. Cada planilla se cuenta de forma
+     independiente, aunque sea del mismo curso y periodo que otra que ya
+     procesaste.
+   - IGNORA por completo las columnas tituladas "Min" y "Fls.": no las leas ni
+     las guardes. Aunque traigan números reales (minutos de tardanza y cantidad
+     de faltas), esos datos no son parte del sistema.
    - Si una fila está marcada con asteriscos (****) o dice "retirado", pon
      "retirado": true, "area_trabajo": null y "ev_anteriores": [].
+   - La fila retirado suele venir con "********" en TODAS sus celdas (leyenda,
+     Ev. Anteriores, Min, Fls., cada columna de Área de Trabajo y Fallas). Son
+     una sola marca, no datos: poné "retirado": true y no intentes leer los
+     asteriscos como números ni como notas ("area_trabajo" va en null).
    - Si una celda está en blanco o tachada sin valor claro, devolvé null (nunca 0).
    - Si una nota fue corregida (tachada y reescrita), devolvé el valor VIGENTE
      (el reescrito), no el tachado.
@@ -620,6 +658,10 @@ REGLAS IMPORTANTES:
      el número tal cual aparece en la planilla, sin cambiar su escala.
    - Si un número está escrito con los dígitos muy separados (ej. "4 5") NO lo
      escribas como uno solo: devolvé null y marcá revisar en true.
+   - Ignorá por completo cualquier texto manuscrito que aparezca DEBAJO de la
+     última fila de la tabla de estudiantes o debajo de la línea "Firma Docente"
+     (fechas de clase, temas, tareas, firmas). Esos apuntes no son notas de
+     ningún estudiante.
 
 3. Devolvé SOLO el JSON. No agregues explicaciones.
 """.strip()

@@ -260,10 +260,72 @@ class TestPipelineCincoNotas(unittest.TestCase):
 
             import openpyxl
             wb = openpyxl.load_workbook(ruta_xlsx)
-            self.assertEqual(wb.sheetnames, ["Curso 0302"])
+            self.assertEqual(wb.sheetnames, ["Curso 0302 - MATES"])
         finally:
             import shutil
             shutil.rmtree(dir_tmp, ignore_errors=True)
+
+
+class TestNAreaTrabajoEncabezado(unittest.TestCase):
+    """S13: el n_area_trabajo declarado se conserva en el encabezado normalizado
+    y el prompt lo pide explícitamente (el modelo contaba celdas llenas, no
+    columnas del encabezado: planillas con celdas vacías salían con menos de
+    las notas reales)."""
+
+    def test_encabezado_conserva_declarado(self):
+        p = gem._normalizar_planilla(
+            self._planilla([40, 50, 60], n_area_trabajo=4)
+        )
+        self.assertEqual(p["encabezado"]["n_area_trabajo"], 4)
+
+    def test_encabezado_sin_declarado_queda_none(self):
+        p = gem._normalizar_planilla(
+            self._planilla([40, 50, 60], n_area_trabajo=None)
+        )
+        self.assertIsNone(p["encabezado"]["n_area_trabajo"])
+
+    def test_declarado_bool_no_es_conteo(self):
+        # Un bool NO es un conteo: se conserva como None (nunca 1 ni 4).
+        p = gem._normalizar_planilla(
+            self._planilla([40], n_area_trabajo=True)
+        )
+        self.assertIsNone(p["encabezado"]["n_area_trabajo"])
+
+    def test_prompt_pide_n_area_trabajo_contando_encabezado(self):
+        # Guarda de regresión: el prompt debe pedir el campo y la regla de
+        # contar columnas del ENCABEZADO aunque las celdas estén vacías.
+        self.assertIn("n_area_trabajo", gem._PROMPT_PLANILLA)
+        self.assertIn("EXACTAMENTE n_area_trabajo", gem._PROMPT_PLANILLA)
+        self.assertIn("columnas del encabezado", gem._PROMPT_PLANILLA)
+
+    def test_prompt_incluye_refuerzos_nuevos(self):
+        # Guardas de regresión (S16): membrete, rótulos cortados, apuntes
+        # debajo de la tabla, fila retirado con asteriscos en todas las celdas,
+        # Min/Fls. ignoradas aunque traigan datos, y cantidades de columnas
+        # independientes entre planillas del mismo curso. Substrings sin
+        # acentos para evitar problemas de encoding.
+        self.assertIn("LISTA AUXILIAR DE CLASE", gem._PROMPT_PLANILLA)
+        self.assertIn("Firma Docente", gem._PROMPT_PLANILLA)
+        self.assertIn("Nunca asumas", gem._PROMPT_PLANILLA)
+        self.assertIn("Min", gem._PROMPT_PLANILLA)
+        self.assertIn("Fls", gem._PROMPT_PLANILLA)
+        self.assertIn("retirado", gem._PROMPT_PLANILLA)
+        self.assertIn("membrete", gem._PROMPT_PLANILLA)
+        self.assertIn("CamScanner", gem._PROMPT_PLANILLA)
+
+    def _planilla(self, area_trabajo, n_area_trabajo):
+        return {
+            "encabezado": {
+                "institucion": "I", "sede": "S", "año_lectivo": "2026",
+                "jornada": "M", "grupo": "0302", "asignatura": "A",
+                "docente": "D", "periodo": 3, "n_area_trabajo": n_area_trabajo,
+            },
+            "estudiantes": [
+                {"no": 1, "nombre": "ALUMNO 1", "ev_anteriores": [45, 45],
+                 "area_trabajo": area_trabajo, "retirado": False,
+                 "revisar": [False] * 10},
+            ],
+        }
 
 
 if __name__ == "__main__":

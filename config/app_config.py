@@ -53,7 +53,7 @@ def logs_dir() -> str:
 def _config_defaults() -> dict:
     return {
         "api_key": "",
-        "modelo_vision": "gemini-3.7-flash",
+        "modelo_vision": "gemini-2.5-flash-lite",
         "preferencias": {
             "dpi_pdf": 250,
             "carpeta_salida": "",

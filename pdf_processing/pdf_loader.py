@@ -17,6 +17,9 @@ DPI_POR_DEFECTO = 250
 DPI_MINIMO = 150
 DPI_MAXIMO = 400
 
+# Límite de planillas por PDF para no saturar la cuota gratuita de la API.
+MAX_PLANILLAS_POR_PDF = 10
+
 
 class PdfError(Exception):
     """Error de lectura del PDF con mensaje amigable para la usuaria."""
@@ -146,9 +149,15 @@ def cerrar_paginas(paginas) -> None:
 
 
 def contar_paginas(ruta_pdf: str) -> int:
-    """Devuelve el número de páginas del PDF (sin convertirlas todas)."""
+    """Devuelve el número de páginas del PDF (sin rasterizar nada).
+
+    Barato: no convierte las páginas a imágenes, solo abre el documento y lee
+    `page_count`. Si la ruta no existe, no es un PDF o no se puede abrir,
+    lanza PdfError (igual que validar_pdf). El documento siempre se cierra.
+    """
     validar_pdf(ruta_pdf)
     doc = fitz.open(ruta_pdf)
-    n = doc.page_count
-    doc.close()
-    return n
+    try:
+        return doc.page_count
+    finally:
+        doc.close()

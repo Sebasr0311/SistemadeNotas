@@ -112,6 +112,19 @@ class TestNormalizarEv(unittest.TestCase):
 class TestExtraerPlanillaPdf(unittest.TestCase):
     """S2: páginas fallidas no tiran el lote; excepciones raras propagan."""
 
+    @classmethod
+    def setUpClass(cls):
+        # Fuga de log: estos tests fuerzan páginas fallidas a propósito y
+        # extraer_planilla_pdf registra cada una en el log REAL del usuario
+        # (%APPDATA%\\SistemaNotas\\log.txt). Se neutraliza escribiendo en el
+        # vacío para TODA la clase, así la suite no contamina el diagnóstico
+        # de corridas reales.
+        cls._parche_log = mock.patch.object(
+            gemini_extractor.app_config, "escribir_log", return_value=None
+        )
+        cls._parche_log.start()
+        cls.addClassCleanup(cls._parche_log.stop)
+
     def _paginas(self, n):
         return [{"imagen": object()} for _ in range(n)]
 

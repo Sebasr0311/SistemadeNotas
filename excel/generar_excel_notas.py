@@ -15,26 +15,18 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 
-def _escribir_hoja(ws, planilla: dict):
-    enc = planilla["encabezado"]
-    estudiantes = planilla["estudiantes"]
-    periodo = enc["periodo"]
-    # Guard W1/W-A: nunca generar un Excel corrupto con un periodo inválido.
-    # Si llega mal desde cualquier fuente (visión, edición manual, etc.), se
-    # aborta en vez de que la nota pise la columna del nombre.
-    if not (isinstance(periodo, int) and 1 <= periodo <= 4):
-        raise ValueError(
-            f"Periodo inválido ({periodo!r}) en el curso {enc.get('grupo', '?')}: "
-            "debe ser 1, 2, 3 o 4."
-        )
-    n_ev_anteriores = periodo - 1
+def calcular_n_areas(enc, estudiantes) -> int:
+    """Cantidad de columnas de área de trabajo (spec v2: de 1 a 16 notas).
 
-    # --- Ancho de la zona de área de trabajo (spec v2: 1 a 16 notas) ---
-    # El ancho se adapta a la cantidad REAL de notas leídas (1 a 16), nunca
-    # deja afuera una nota leída. Si el encabezado declara n_area_trabajo y
-    # ese valor es mayor a lo observado, prevalece el declarado (celdas vacías
-    # al final) para reflejar la planilla física. Si no se declaró ni hay
-    # notas, se cae al comportamiento histórico: planilla tradicional de 2.
+    Misma lógica que usa el generador para dimensionar la hoja, extraída como
+    función pura para que la pantalla de revisión de la GUI calcule EXACTAMENTE
+    el mismo ancho (S8: lo que se muestra es lo que se escribe):
+    - Si el encabezado declara n_area_trabajo como int (no bool) en 1..16,
+      prevalece el declarado (celdas vacías al final si hay menos observadas).
+    - Si no, se usa lo observado: la mayor cantidad de notas leídas por alumno.
+    - Sin nada que medir, se cae al comportamiento histórico: planilla
+      tradicional de 2 notas.
+    """
     declarado_raw = enc.get("n_area_trabajo")
     declarado = (
         declarado_raw
@@ -51,6 +43,25 @@ def _escribir_hoja(ws, planilla: dict):
     if n_areas == 0:
         # Sin declaración y sin ninguna nota: planillas tradicionales de 2 notas.
         n_areas = 2
+    return n_areas
+
+
+def _escribir_hoja(ws, planilla: dict):
+    enc = planilla["encabezado"]
+    estudiantes = planilla["estudiantes"]
+    periodo = enc["periodo"]
+    # Guard W1/W-A: nunca generar un Excel corrupto con un periodo inválido.
+    # Si llega mal desde cualquier fuente (visión, edición manual, etc.), se
+    # aborta en vez de que la nota pise la columna del nombre.
+    if not (isinstance(periodo, int) and 1 <= periodo <= 4):
+        raise ValueError(
+            f"Periodo inválido ({periodo!r}) en el curso {enc.get('grupo', '?')}: "
+            "debe ser 1, 2, 3 o 4."
+        )
+    n_ev_anteriores = periodo - 1
+
+    # --- Ancho de la zona de área de trabajo (spec v2: 1 a 16 notas) ---
+    n_areas = calcular_n_areas(enc, estudiantes)
 
     bold = Font(bold=True)
     header_fill = PatternFill("solid", fgColor="D9E1F2")
@@ -191,8 +202,13 @@ def generar_excel_asignatura(planillas: list, ruta_salida: str):
     por_curso, orden_grupos = agrupar_por_curso(planillas)
 
     nombres_usados = set()
-    for grupo in orden_grupos:
-        paginas = por_curso[grupo]
+    for clave in orden_grupos:
+        # S8: cada clave es una tupla (grupo, asignatura): una hoja por
+        # asignatura+curso, para que asignaturas distintas de un mismo curso
+        # (caso diagnosticado) no se mezclen ni se pierdan notas.
+        grupo = clave[0]
+        asignatura = clave[1]
+        paginas = por_curso[clave]
         # SIEMPRE se combina con dedupe (S11), incluso con una sola página:
         # la pantalla de revisión combina igual, y lo que el Excel escribe debe
         # ser EXACTAMENTE lo que la GUI mostró (S8). Sin duplicados, es la
@@ -201,7 +217,9 @@ def generar_excel_asignatura(planillas: list, ruta_salida: str):
         base["estudiantes"] = combinar_estudiantes(paginas)
         planilla_final = base
 
-        nombre_hoja = f"Curso {grupo}"[:31]
+        # Nombre de hoja legible y estable: "Curso {grupo} - {asignatura corta}".
+        asignatura_corta = asignatura[:22].strip()
+        nombre_hoja = f"Curso {grupo} - {asignatura_corta}"[:31]
         original = nombre_hoja
         i = 2
         while nombre_hoja in nombres_usados:
