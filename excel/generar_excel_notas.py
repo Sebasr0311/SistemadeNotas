@@ -141,7 +141,12 @@ def _escribir_hoja(ws, planilla: dict):
         atN_ref = f"{get_column_letter(col_def - 1)}{r}"
         cdef = ws.cell(row=r, column=col_def)
         if at and len(at) >= 1:
-            cdef.value = f"=IFERROR(AVERAGE({at1_ref}:{atN_ref}),\"\")"
+            # La definitiva divide por el TOTAL de columnas de área (n_areas),
+            # no por las notas que tiene el alumno: una celda en blanco es una
+            # actividad no realizada y cuenta como 0 para el promedio del
+            # periodo (con AVERAGE los vacíos se ignoraban y el promedio salía
+            # sobre las notas presentes, inflando la definitiva).
+            cdef.value = f"=IFERROR(SUM({at1_ref}:{atN_ref})/{n_areas},\"\")"
         cdef.border = border; cdef.alignment = center
         cdef.font = bold
 

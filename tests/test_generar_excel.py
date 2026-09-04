@@ -99,7 +99,7 @@ class TestGeneradorExcel(unittest.TestCase):
         wb = openpyxl.load_workbook(self.ruta_xlsx)
         ws = wb["Curso 0302 - MATEMATICAS"]
         hay_formula = any(
-            isinstance(cell.value, str) and cell.value.startswith("=IFERROR(AVERAGE")
+            isinstance(cell.value, str) and cell.value.startswith("=IFERROR(SUM")
             for row in ws.iter_rows()
             for cell in row
         )

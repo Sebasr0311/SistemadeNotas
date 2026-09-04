@@ -90,13 +90,14 @@ class TestAnchoDinamicoAreas(unittest.TestCase):
         self.assertIn("Definitiva Periodo 3", headers)
 
         # Alumno 1 (fila 11): nota 5 en la columna I (9), nota 1 en E (5),
-        # y la definitiva en J (10) con AVERAGE(E:I).
+        # y la definitiva en J (10) con SUM(E:I)/5 (divide por las 5 columnas).
         self.assertEqual(ws.cell(row=11, column=5).value, 40)
         self.assertEqual(ws.cell(row=11, column=9).value, 80)
-        # La fórmula usa el rango completo de las 5 celdas de área (E:I).
+        # La fórmula usa el rango completo de las 5 celdas de área (E:I)
+        # dividido por el total de columnas, no por lo que trae el alumno.
         self.assertEqual(
             ws.cell(row=11, column=10).value,
-            '=IFERROR(AVERAGE(E11:I11),"")',
+            '=IFERROR(SUM(E11:I11)/5,"")',
         )
 
     def test_alumno_con_menos_notas_deja_celda_vacia(self):
@@ -114,6 +115,26 @@ class TestAnchoDinamicoAreas(unittest.TestCase):
         self.assertEqual(ws.cell(row=12, column=8).value, 71)  # 4ª nota (H)
         self.assertIsNone(ws.cell(row=12, column=9).value)  # 5ª celda vacía (I)
 
+    def test_dos_notas_de_cinco_divide_por_el_total_de_columnas(self):
+        # Un alumno con 2 notas en una planilla de 5: la definitiva divide por
+        # 5 (el total de columnas de área), no por las 2 notas presentes: las
+        # celdas en blanco son actividades no realizadas (cuentan como 0).
+        planilla = _planilla(
+            [
+                [40, 50, 60, 70, 80],
+                [41, 51],  # solo 2 notas de 5
+            ],
+            n_area_trabajo=5,
+        )
+        ws = _hoja_cargada(planilla)
+        self.assertEqual(ws.cell(row=12, column=5).value, 41)
+        self.assertEqual(ws.cell(row=12, column=6).value, 51)
+        self.assertIsNone(ws.cell(row=12, column=7).value)  # 3ª celda vacía (G)
+        self.assertEqual(
+            ws.cell(row=12, column=10).value,
+            '=IFERROR(SUM(E12:I12)/5,"")',
+        )
+
     def test_una_sola_nota_genera_una_columna_y_formula_EE(self):
         # Periodo 3 => área arranca en E; una sola nota => col_def = F, rango E:E.
         planilla = _planilla(
@@ -129,7 +150,7 @@ class TestAnchoDinamicoAreas(unittest.TestCase):
         self.assertEqual(ws.cell(row=11, column=5).value, 55)
         self.assertEqual(
             ws.cell(row=11, column=6).value,
-            '=IFERROR(AVERAGE(E11:E11),"")',
+            '=IFERROR(SUM(E11:E11)/1,"")',
         )
 
     def test_inferencia_sin_declaracion_usa_lo_observado(self):
@@ -152,7 +173,7 @@ class TestAnchoDinamicoAreas(unittest.TestCase):
         # Área arranca en E (3), con 3 notas => col_def = 5 + 3 = 8 (H);
         # rango E:G en la celda de definitiva.
         self.assertEqual(ws.cell(row=11, column=8).value,
-                         '=IFERROR(AVERAGE(E11:G11),"")')
+                         '=IFERROR(SUM(E11:G11)/3,"")')
 
 
 class TestCalcularNAreas(unittest.TestCase):
