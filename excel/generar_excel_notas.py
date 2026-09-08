@@ -15,6 +15,151 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 
+# ────────────────────────────────────────────────────────────────────
+# Configuración de cálculo de notas (columnas seleccionables + pesos)
+# ────────────────────────────────────────────────────────────────────
+
+class ColumnConfig:
+    """
+    Representa la configuración de cálculo de notas para un curso.
+
+    Attributes:
+        modo: "simple" (promedio aritmético) o "pesos" (ponderado).
+        columnas: lista de dicts, uno por cada columna de Área de Trabajo:
+            {
+                "nombre": str,       # Nombre legible (ej. "Área Trabajo 1")
+                "incluida": bool,    # True si entra al cálculo de la definitiva
+                "peso": float,       # Porcentaje (0-100). Solo relevante si modo == "pesos".
+            }
+    """
+
+    def __init__(self, modo="simple", columnas=None):
+        self.modo = modo if modo in ("simple", "pesos") else "simple"
+        self.columnas = columnas or []
+
+    @property
+    def columnas_seleccionadas(self):
+        """Índices (0-based) de las columnas que entran al cálculo."""
+        return [i for i, c in enumerate(self.columnas) if c.get("incluida", False)]
+
+    @property
+    def pesos_seleccionados(self):
+        """Dict {índice: peso} de las columnas seleccionadas."""
+        return {
+            i: c.get("peso", 0)
+            for i, c in enumerate(self.columnas)
+            if c.get("incluida", False)
+        }
+
+    @property
+    def n_columnas_seleccionadas(self):
+        return len(self.columnas_seleccionadas)
+
+    def es_pesado(self):
+        return self.modo == "pesos" and self.n_columnas_seleccionadas > 1
+
+    def pesos_suman_cien(self, tolerancia=0.01):
+        """True si la suma de pesos de columnas seleccionadas ≈ 100."""
+        if not self.es_pesado():
+            return True
+        total = sum(self.pesos_seleccionados.values())
+        return abs(total - 100.0) <= tolerancia
+
+    def to_dict(self):
+        return {"modo": self.modo, "columnas": self.columnas}
+
+    @classmethod
+    def from_dict(cls, data):
+        if not data:
+            return cls()
+        return cls(modo=data.get("modo", "simple"), columnas=data.get("columnas", []))
+
+    @classmethod
+    def crear_desde_planilla(cls, n_columnas):
+        """Crea una config por defecto: simple, todas las columnas incluidas, peso=100/n."""
+        peso = round(100.0 / n_columnas, 1) if n_columnas > 0 else 0
+        return cls(
+            modo="simple",
+            columnas=[
+                {"nombre": f"Área Trabajo {k+1}", "incluida": True, "peso": peso}
+                for k in range(n_columnas)
+            ],
+        )
+
+
+def nombres_columnas_areas(enc, n_areas):
+    """Devuelve la lista de nombres legibles de las columnas de Área de Trabajo."""
+    return [f"Área Trabajo {k+1}" for k in range(n_areas)]
+
+
+def _formula_definitiva(col_at1, col_def_menos1, r, n_columnas_total,
+                        column_config=None):
+    """
+    Genera la fórmula de Excel para la definitiva de un curso.
+
+    Parámetros:
+        col_at1: columna de la primera Área de Trabajo (1-based)
+        col_def_menos1: columna justo antes de la Definitiva (1-based)
+        r: fila del estudiante
+        n_columnas_total: total de columnas de área (para el modo simple sin config)
+        column_config: ColumnConfig (None = modo simple con todas las columnas)
+
+    Fórmulas generadas:
+        Sin config / simple:    =IFERROR(SUM(col1:colN)/n,"")
+        Pesos sin destino:      =IFERROR(SUMPRODUCT(col*pesos)/100,"")
+        Pesos con destino:      =IFERROR(SUMPRODUCT(col*pesos)/SUM(pesos),"")
+    """
+    from openpyxl.utils import get_column_letter as gcl
+
+    if column_config is None:
+        # Modo legacy: simple con todas las columnas
+        at1_ref = f"{gcl(col_at1)}{r}"
+        atn_ref = f"{gcl(col_def_menos1)}{r}"
+        return f"=IFERROR(SUM({at1_ref}:{atn_ref})/{n_columnas_total},\"\")"
+
+    seleccionadas = column_config.columnas_seleccionadas
+    if not seleccionadas:
+        return ""
+
+    if not column_config.es_pesado():
+        # Promedio simple de columnas seleccionadas
+        refs = [f"{gcl(col_at1 + k)}{r}" for k in seleccionadas]
+        n = len(refs)
+        if n == 1:
+            return f"=IFERROR({refs[0]},\"\")"
+        return f"=IFERROR(AVERAGE({','.join(refs)}),\"\")"
+
+    # ── Modo pesos ──
+    pesos = column_config.pesos_seleccionados
+    n = len(seleccionadas)
+    if n == 0:
+        return ""
+    if n == 1:
+        # Un solo factor: se usa directamente (peso irrelevante)
+        ref = f"{gcl(col_at1 + seleccionadas[0])}{r}"
+        return f"=IFERROR({ref},\"\")"
+
+    # SUMPRODUCT(col * pesos_vector) / divisor
+    col_refs = [gcl(col_at1 + k) for k in seleccionadas]
+    peso_vals = [str(pesos[k]) for k in seleccionadas]
+
+    # Construir la fórmula con una referencia de columna por cada peso
+    # para que el recálculo automático funcione.
+    partes = []
+    for col_ref, peso_val in zip(col_refs, peso_vals):
+        partes.append(f"{col_ref}{r}*{peso_val}")
+
+    numerador = "+".join(partes)
+
+    if column_config.pesos_suman_cien():
+        divisor = "100"
+    else:
+        pesos_suma = "+".join(peso_vals)
+        divisor = f"({pesos_suma})"
+
+    return f"=IFERROR(({numerador})/{divisor},\"\")"
+
+
 def calcular_n_areas(enc, estudiantes) -> int:
     """Cantidad de columnas de área de trabajo (spec v2: de 1 a 16 notas).
 
@@ -46,13 +191,19 @@ def calcular_n_areas(enc, estudiantes) -> int:
     return n_areas
 
 
-def _escribir_hoja(ws, planilla: dict):
+def _escribir_hoja(ws, planilla: dict, column_config=None):
+    """
+    Escribe una hoja de Excel con los datos de una planilla.
+
+    Args:
+        ws: hoja de openpyxl.
+        planilla: dict con encabezado + estudiantes.
+        column_config: ColumnConfig (None = promedio simple de todas las columnas).
+    """
     enc = planilla["encabezado"]
     estudiantes = planilla["estudiantes"]
     periodo = enc["periodo"]
     # Guard W1/W-A: nunca generar un Excel corrupto con un periodo inválido.
-    # Si llega mal desde cualquier fuente (visión, edición manual, etc.), se
-    # aborta en vez de que la nota pise la columna del nombre.
     if not (isinstance(periodo, int) and 1 <= periodo <= 4):
         raise ValueError(
             f"Periodo inválido ({periodo!r}) en el curso {enc.get('grupo', '?')}: "
@@ -81,6 +232,21 @@ def _escribir_hoja(ws, planilla: dict):
         ("Docente", enc.get("docente", "")),
         ("Periodo", periodo),
     ]
+
+    # Agregar info de modo de cálculo si hay config
+    if column_config:
+        modo_label = "Pesos" if column_config.modo == "pesos" else "Promedio simple"
+        info_rows.append(("Modo de cálculo", modo_label))
+        if column_config.modo == "pesos":
+            seleccionadas = column_config.columnas_seleccionadas
+            pesos = column_config.pesos_seleccionados
+            partes = []
+            for idx in seleccionadas:
+                peso = pesos[idx]
+                nombre = column_config.columnas[idx]["nombre"]
+                partes.append(f"{nombre}: {peso:.1f}%")
+            info_rows.append(("Pesos", " | ".join(partes) if partes else "Ninguna columna"))
+
     for i, (label, value) in enumerate(info_rows, start=1):
         ws.cell(row=i, column=1, value=label).font = bold
         ws.cell(row=i, column=2, value=value)
@@ -137,16 +303,12 @@ def _escribir_hoja(ws, planilla: dict):
             if k < len(revisar) and revisar[k]:
                 c.fill = revisar_fill
 
-        at1_ref = f"{get_column_letter(col_at1)}{r}"
-        atN_ref = f"{get_column_letter(col_def - 1)}{r}"
+        # ── Definitiva del periodo (con column_config si la hay) ──
         cdef = ws.cell(row=r, column=col_def)
         if at and len(at) >= 1:
-            # La definitiva divide por el TOTAL de columnas de área (n_areas),
-            # no por las notas que tiene el alumno: una celda en blanco es una
-            # actividad no realizada y cuenta como 0 para el promedio del
-            # periodo (con AVERAGE los vacíos se ignoraban y el promedio salía
-            # sobre las notas presentes, inflando la definitiva).
-            cdef.value = f"=IFERROR(SUM({at1_ref}:{atN_ref})/{n_areas},\"\")"
+            cdef.value = _formula_definitiva(
+                col_at1, col_def - 1, r, n_areas, column_config
+            )
         cdef.border = border; cdef.alignment = center
         cdef.font = bold
 
@@ -173,56 +335,52 @@ def _escribir_hoja(ws, planilla: dict):
         ws.column_dimensions[get_column_letter(j)].width = 14
 
 
-def generar_excel_planilla(planilla: dict, ruta_salida: str):
-    """Genera un Excel de una sola planilla (un curso). Ver generar_excel_asignatura
-    para el caso real de uso: un PDF con varias planillas de la misma asignatura."""
+def generar_excel_planilla(planilla: dict, ruta_salida: str, column_config=None):
+    """
+    Genera un Excel de una sola planilla (un curso).
+
+    Args:
+        planilla: dict con encabezado + estudiantes.
+        ruta_salida: ruta del archivo .xlsx de salida.
+        column_config: ColumnConfig (None = promedio simple de todas las columnas).
+    """
     wb = openpyxl.Workbook()
     ws = wb.active
     enc = planilla["encabezado"]
     ws.title = f"P{enc['periodo']} - {enc['grupo']}"
-    _escribir_hoja(ws, planilla)
+    _escribir_hoja(ws, planilla, column_config)
     wb.save(ruta_salida)
     return ruta_salida
 
 
-def generar_excel_asignatura(planillas: list, ruta_salida: str):
+def generar_excel_asignatura(planillas: list, ruta_salida: str, column_config=None):
     """
     Caso real de uso: un PDF sube TODAS las planillas de una misma asignatura
     (varios cursos/grupos). Se agrupan automáticamente por curso y se genera
     UN SOLO Excel con una hoja por cada curso.
 
-    planillas: lista de dicts, cada uno con la misma forma que en
-    generar_excel_planilla (un dict por planilla/página reconocida en el PDF).
+    Args:
+        planillas: lista de dicts, cada uno con encabezado + estudiantes.
+        ruta_salida: ruta del archivo .xlsx de salida.
+        column_config: ColumnConfig (None = promedio simple de todas las columnas).
+                       Se aplica la MISMA config a todas las hojas.
     """
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # se reemplaza por una hoja por curso
 
-    # S8: la agrupación por curso y la combinación de estudiantes viven en
-    # excel/agrupacion.py, la MISMA fuente de verdad que usa la pantalla de
-    # revisión de la GUI: el Excel escribe exactamente lo que la GUI muestra.
-    # S11: combinar_estudiantes descarta estudiantes duplicados (páginas
-    # repetidas o solapadas) antes de escribirlos.
     from excel.agrupacion import agrupar_por_curso, combinar_estudiantes
 
     por_curso, orden_grupos = agrupar_por_curso(planillas)
 
     nombres_usados = set()
     for clave in orden_grupos:
-        # S8: cada clave es una tupla (grupo, asignatura): una hoja por
-        # asignatura+curso, para que asignaturas distintas de un mismo curso
-        # (caso diagnosticado) no se mezclen ni se pierdan notas.
         grupo = clave[0]
         asignatura = clave[1]
         paginas = por_curso[clave]
-        # SIEMPRE se combina con dedupe (S11), incluso con una sola página:
-        # la pantalla de revisión combina igual, y lo que el Excel escribe debe
-        # ser EXACTAMENTE lo que la GUI mostró (S8). Sin duplicados, es la
-        # identidad: misma hoja y mismas filas que el comportamiento histórico.
         base = dict(paginas[0])
         base["estudiantes"] = combinar_estudiantes(paginas)
         planilla_final = base
 
-        # Nombre de hoja legible y estable: "Curso {grupo} - {asignatura corta}".
         asignatura_corta = asignatura[:22].strip()
         nombre_hoja = f"Curso {grupo} - {asignatura_corta}"[:31]
         original = nombre_hoja
@@ -233,7 +391,7 @@ def generar_excel_asignatura(planillas: list, ruta_salida: str):
         nombres_usados.add(nombre_hoja)
 
         ws = wb.create_sheet(title=nombre_hoja)
-        _escribir_hoja(ws, planilla_final)
+        _escribir_hoja(ws, planilla_final, column_config)
 
     wb.save(ruta_salida)
     return ruta_salida

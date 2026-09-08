@@ -564,22 +564,29 @@ def extraer_planilla_pdf(
 
 # Prompt en español, claro y simple, que le pide al modelo devolver JSON con la
 # estructura exacta que espera el generador de Excel.
+#
+# Diseñado para ADAPTARSE a cualquier planilla (no solo al formato tradicional):
+# los campos del encabezado se leen cuando existen y quedan vacíos si no; las
+# columnas de notas se detectan por su contenido (números manuscritos por
+# alumno), no por un nombre fijo; y la cantidad de columnas SIEMPRE se cuenta
+# de la planilla real, nunca se asume.
 _PROMPT_PLANILLA = """
 Eres un asistente de lectura de planillas de notas escolares en papel.
-Te voy a pasar la foto de UNA página de una planilla de notas manuscrita con lapicero.
+Te voy a pasar la foto de UNA página de una planilla de notas manuscrita (puede
+ser de formato tradicional o de cualquier otra disposición).
 
 Debés leer el encabezado y la tabla de estudiantes, y responder SOLAMENTE con
 JSON válido (sin texto adicional, sin marcas de código), con esta estructura:
 
 {
   "encabezado": {
-    "institucion": "texto",
-    "sede": "texto",
-    "año_lectivo": "texto",
-    "jornada": "texto",
-    "grupo": "texto de 4 dígitos, ej. 0302",
-    "asignatura": "texto",
-    "docente": "texto",
+    "institucion": "texto o cadena vacía si no aparece",
+    "sede": "texto o cadena vacía si no aparece",
+    "año_lectivo": "texto o cadena vacía si no aparece",
+    "jornada": "texto o cadena vacía si no aparece",
+    "grupo": "texto de 4 dígitos, ej. 0302, o cadena vacía si no aparece",
+    "asignatura": "texto o cadena vacía si no aparece",
+    "docente": "texto o cadena vacía si no aparece",
     "periodo": 3,
     "n_area_trabajo": 4
   },
@@ -601,11 +608,15 @@ Lee SIEMPRE la cantidad real de columnas, nunca fijes el tamaño.
 
 REGLAS IMPORTANTES:
 
-1. ENCABEZADO:
-   - "periodo" es un número entero del 1 al 4 (el periodo académico de la planilla).
-   - "grupo" es un número de 4 dígitos como "0302" (grado y grupo). Nunca inventes
-     un grupo que no esté escrito.
-   - "año_lectivo" suele ser un año (ej. "2026").
+1. ENCABEZADO (ADAPTATIVO):
+   - "periodo" es un número entero del 1 al 4 (el periodo académico de la
+     planilla). Si la planilla no indica periodo en números, inferilo por
+     contexto (1, 2, 3 o 4).
+   - "grupo" es un número de 4 dígitos como "0302" (grado y grupo). Nunca
+     inventes un grupo que no esté escrito; si no aparece, devolvé "".
+   - "año_lectivo" suele ser un año (ej. "2026"); si no aparece, devolvé "".
+   - Los campos que la planilla NO tenga (institución, sede, jornada, docente,
+     asignatura) se devuelven como cadena vacía: nunca inventes contenido.
    - El texto fijo "LISTA AUXILIAR DE CLASE" es el membrete impreso de la
      planilla, NO un dato: ignoralo (no lo extraigas como institución, sede ni
      en ningún otro campo).
@@ -616,29 +627,40 @@ REGLAS IMPORTANTES:
      siempre aparece), no solo por el texto literal. No dejes el campo vacío ni
      falles por un rótulo parcialmente cortado: el valor de la celda a la
      derecha del rótulo suele estar legible.
-   - "n_area_trabajo" es la cantidad de columnas "ÁREA DE TRABAJO"/"AREA DE
-     TRABAJO" impresas en el ENCABEZADO de la tabla (de 1 a 16). Contá las
-     columnas del encabezado, NO las celdas llenas: si la fila de títulos dice
-     ÁREA DE TRABAJO 1, 2, 3 y 4, devolvé 4 aunque en varios alumnos la última
-     celda esté en blanco (las planillas reales suelen dejar celdas vacías).
+   - "n_area_trabajo" es la cantidad de COLUMNAS DE NOTAS que tiene la tabla
+     para el periodo actual. Identificalas así:
+       * En el formato tradicional: son las columnas tituladas "ÁREA DE
+         TRABAJO"/"AREA DE TRABAJO" impresas en el ENCABEZADO de la tabla.
+       * En OTROS formatos: son las columnas cuyas celdas contienen las notas
+         manuscritas del periodo actual para cada alumno (números).
+       * NO cuentes columnas que sean definitivas, promedios, porcentajes,
+         asistencia, "Min", "Fls." u otros datos que no sean notas del corte.
+       Contá las columnas del encabezado, NO las celdas llenas: si el título
+       dice ÁREA DE TRABAJO 1, 2, 3 y 4, devolvé 4 aunque en varios alumnos la
+       última celda esté en blanco (las planillas reales suelen dejar celdas
+       vacías).
 
-2. TABLA DE ESTUDIANTES:
-   - "ev_anteriores" son las notas definitivas de periodos anteriores (una por cada
-     columna que aparezca; si hay 2 columnas van 2 valores, si hay 3 van 3).
+2. TABLA DE ESTUDIANTES (ADAPTATIVA):
+   - "ev_anteriores" son las notas definitivas de periodos anteriores (una por
+     cada columna que aparezca; si no hay columnas de periodos anteriores,
+     devolvé un arreglo vacío []).
    - "area_trabajo" son las notas manuscritas del periodo actual, UNA por cada
-     columna de área que aparezca en la planilla (de 1 a 16 valores, NUNCA fijes
-     la cantidad: leé exactamente cuántas columnas hay). Si una celda está en
-     blanco, pon null en esa posición. ATENCIÓN: cada alumno debe traer
-     EXACTAMENTE n_area_trabajo valores: si el encabezado tiene 4 columnas, el
-     arreglo de cada alumno tiene 4 posiciones (las vacías van como null), aunque
-     ese alumno no tenga todas las notas.
+     columna de notas que detectes en la planilla (de 1 a 16 valores, NUNCA
+     fijes la cantidad: leé exactamente cuántas columnas hay). Si una celda
+     está en blanco, pon null en esa posición. ATENCIÓN: cada alumno debe
+     traer EXACTAMENTE n_area_trabajo valores: si el encabezado tiene 4
+     columnas, el arreglo de cada alumno tiene 4 posiciones (las vacías van
+     como null), aunque ese alumno no tenga todas las notas.
    - Nunca asumas que dos planillas del mismo curso y periodo tienen la misma
-     cantidad de columnas de Área de Trabajo. Cada planilla se cuenta de forma
+     cantidad de columnas de notas. Cada planilla se cuenta de forma
      independiente, aunque sea del mismo curso y periodo que otra que ya
      procesaste.
+   - Si una columna parece una DEFINITIVA (promedio, definitiva de corte o de
+     periodo), NO la incluyas en "area_trabajo": no es una nota del periodo
+     actual, es un cálculo. La usuaria luego elige qué columnas usar.
    - IGNORA por completo las columnas tituladas "Min" y "Fls.": no las leas ni
-     las guardes. Aunque traigan números reales (minutos de tardanza y cantidad
-     de faltas), esos datos no son parte del sistema.
+     las guardes. Aunque traigan números reales (minutos de tardanza y
+     cantidad de faltas), esos datos no son parte del sistema.
    - Si una fila está marcada con asteriscos (****) o dice "retirado", pon
      "retirado": true, "area_trabajo": null y "ev_anteriores": [].
    - La fila retirado suele venir con "********" en TODAS sus celdas (leyenda,
@@ -655,7 +677,8 @@ REGLAS IMPORTANTES:
      leerlo). Si estás seguro, pon false. Nunca inventes un valor dudoso para evitar
      la revisión.
    - Las notas suelen ser números enteros o decimales (ej. 45, 40, 4.5, 50). Devolvé
-     el número tal cual aparece en la planilla, sin cambiar su escala.
+     el número tal cual aparece en la planilla, sin cambiar su escala (si la nota es
+     de 0 a 5, devolvé 4.5; si es de 0 a 100, devolvé 45).
    - Si un número está escrito con los dígitos muy separados (ej. "4 5") NO lo
      escribas como uno solo: devolvé null y marcá revisar en true.
    - Ignorá por completo cualquier texto manuscrito que aparezca DEBAJO de la

@@ -22,6 +22,7 @@ import customtkinter as ctk
 
 from config import app_config
 from excel import generar_excel_notas
+from excel.generar_excel_notas import ColumnConfig, nombres_columnas_areas
 from excel.agrupacion import agrupar_por_curso, combinar_estudiantes, _asignatura_limpia
 from pdf_processing import pdf_loader
 from . import styles
@@ -46,6 +47,7 @@ class App(ctk.CTk):
         self.paginas_total = 0
         self.paginas_fallidas = []    # páginas que no se pudieron leer (S2)
         self.planilla_actual_idx = 0  # índice usado en la pantalla de revisión
+        self._column_config = None    # ColumnConfig (columnas + pesos para el cálculo)
         self._worker_cola = None
         self._worker = None
 
@@ -400,15 +402,18 @@ class App(ctk.CTk):
         self._render_cursos()
 
         boton_guardar = ctk.CTkButton(
-            pantalla, text="Generar Excel", height=52,
+            pantalla, text="Continuar →", height=52,
             font=(styles.FUENTE, styles.TAM_BOTON_GRANDE, "bold"),
-            fg_color=styles.COLOR_VERDE, hover_color="#5AA87A", command=self._generar_excel,
+            fg_color=styles.COLOR_PRINCIPAL, hover_color=styles.COLOR_PRINCIPAL_HOVER,
+            command=self.mostrar_configuracion_calculo,
         )
         boton_guardar.pack(pady=(0, 6))
 
         ctk.CTkLabel(
-            pantalla, text="Amarillo = nota dudosa, verificarla en la planilla física.",
+            pantalla, text="Amarillo = nota dudosa, verificarla en la planilla física.\n"
+            "Después de revisar, elegís qué columnas entran al promedio y cómo se calcula.",
             font=(styles.FUENTE, styles.TAM_TEXTO_CHICO), text_color=styles.COLOR_REVISAR_BORDE,
+            wraplength=640,
         ).pack(pady=(0, 10))
 
         self._cambiar_pantalla(pantalla)
@@ -576,6 +581,315 @@ class App(ctk.CTk):
                     _clear_tooltip(entrada, flag_rev)
                     entrada.pack(side="left", padx=6, pady=3)
 
+    # ------------------------------------------------------------------ #
+    # 4b) Pantalla de configuración de cálculo
+    # ------------------------------------------------------------------ #
+    def mostrar_configuracion_calculo(self):
+        """
+        Pantalla donde la usuaria define CÓMO se calcula la nota definitiva:
+        qué columnas de Área de Trabajo entran al promedio y si es un promedio
+        simple o con pesos (porcentajes) distintos por columna.
+
+        El formulario se reconstruye dinámicamente según el modo elegido:
+        - simple:  checkboxes para marcar qué columnas entran.
+        - pesos:   checkboxes + campo de porcentaje por columna.
+        """
+        # Aplicar correcciones manuales antes de configurar (lo que se muestra
+        # en el resumen es lo que se escribirá en el Excel).
+        self._aplicar_periodo_seleccionado()
+        self._aplicar_ediciones()
+
+        por_curso, orden = agrupar_por_curso(self.planillas)
+        if not orden:
+            # Sin planillas no hay nada que configurar: volver a inicio.
+            self.mostrar_principal()
+            return
+        primer_curso = orden[0]
+        enc = por_curso[primer_curso][0]["encabezado"]
+        estudiantes = combinar_estudiantes(por_curso[primer_curso])
+        n_areas = generar_excel_notas.calcular_n_areas(enc, estudiantes)
+
+        if self._column_config is None or len(self._column_config.columnas) != n_areas:
+            # Config por defecto: simple, todas las columnas incluidas.
+            self._column_config = ColumnConfig.crear_desde_planilla(n_areas)
+
+        pantalla = ctk.CTkFrame(self._contenedor, fg_color=styles.COLOR_FONDO)
+
+        ctk.CTkLabel(
+            pantalla, text="¿Cómo se calcula la nota?",
+            font=(styles.FUENTE, styles.TAM_TITULO, "bold"), text_color=styles.COLOR_TEXTO,
+        ).pack(pady=(24, 4))
+
+        ctk.CTkLabel(
+            pantalla,
+            text="Elegí qué notas entran a la definitiva del periodo. Así, si la planilla\n"
+            "tiene columnas que no son del corte (definitivas de otros periodos, etc.),\n"
+            "no afectan el promedio.",
+            font=(styles.FUENTE, styles.TAM_TEXTO_CHICO), text_color=styles.COLOR_TEXTO_SECUNDARIO,
+            justify="center", wraplength=660,
+        ).pack(pady=(0, 12))
+
+        # ── Modo de cálculo ──
+        frame_modo = ctk.CTkFrame(pantalla, fg_color=styles.COLOR_BLANCO, corner_radius=12,
+                                  border_width=1, border_color="#E3E9F5")
+        frame_modo.pack(fill="x", padx=10, pady=(0, 8))
+
+        ctk.CTkLabel(
+            frame_modo, text="Modo de cálculo",
+            font=(styles.FUENTE, styles.TAM_SUBTITULO, "bold"), text_color=styles.COLOR_TEXTO,
+        ).pack(anchor="w", padx=14, pady=(10, 2))
+
+        self._var_modo = tk.StringVar(value=self._column_config.modo)
+        fila_modo = ctk.CTkFrame(frame_modo, fg_color="transparent")
+        fila_modo.pack(anchor="w", padx=14, pady=(0, 4))
+
+        ctk.CTkRadioButton(
+            fila_modo, text="Promedio simple (todas las notas valen lo mismo)",
+            variable=self._var_modo, value="simple",
+            command=self._on_modo_changed,
+            font=(styles.FUENTE, styles.TAM_TEXTO), text_color=styles.COLOR_TEXTO,
+        ).pack(anchor="w", pady=4)
+
+        ctk.CTkRadioButton(
+            fila_modo, text="Cada nota tiene su porcentaje (pesos)",
+            variable=self._var_modo, value="pesos",
+            command=self._on_modo_changed,
+            font=(styles.FUENTE, styles.TAM_TEXTO), text_color=styles.COLOR_TEXTO,
+        ).pack(anchor="w", pady=4)
+
+        # ── Formulario de columnas (se reconstruye según el modo) ──
+        self._frame_col = ctk.CTkScrollableFrame(
+            pantalla, fg_color="transparent", width=820, height=320,
+        )
+        self._frame_col.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+
+        # ── Aviso de pesos (se crea ANTES del formulario: el formulario lo usa) ──
+        self._label_pesos = ctk.CTkLabel(
+            pantalla, text="", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
+            text_color=styles.COLOR_TEXTO_SECUNDARIO, wraplength=660,
+        )
+        self._label_pesos.pack(pady=(0, 6))
+
+        self._reconstruir_formulario_columnas()
+
+        # ── Botones ──
+        fila_botones = ctk.CTkFrame(pantalla, fg_color="transparent")
+        fila_botones.pack(pady=(0, 10))
+
+        ctk.CTkButton(
+            fila_botones, text="Volver a la revisión", height=44, width=180,
+            font=(styles.FUENTE, styles.TAM_TEXTO, "bold"),
+            fg_color="transparent", text_color=styles.COLOR_TEXTO_SECUNDARIO,
+            border_width=1, border_color="#C6D2E8",
+            hover_color=styles.COLOR_FONDO_SECUNDARIO,
+            command=self.mostrar_revision,
+        ).pack(side="left", padx=8)
+
+        ctk.CTkButton(
+            fila_botones, text="Generar Excel", height=52, width=260,
+            font=(styles.FUENTE, styles.TAM_BOTON_GRANDE, "bold"),
+            fg_color=styles.COLOR_VERDE, hover_color="#5AA87A",
+            command=self._guardar_config_y_generar,
+        ).pack(side="left", padx=8)
+
+        self._cambiar_pantalla(pantalla)
+
+    def _reconstruir_formulario_columnas(self):
+        """Reconstruye el formulario de columnas según el modo elegido."""
+        for w in self._frame_col.winfo_children():
+            w.destroy()
+
+        modo = self._var_modo.get()
+        self._chk_col = {}   # índice -> BooleanVar
+        self._peso_col = {}  # índice -> StringVar
+        self._col_rows = {}  # índice -> frame de fila
+
+        if not self._column_config.columnas:
+            ctk.CTkLabel(
+                self._frame_col,
+                text="No se detectaron columnas de notas en esta planilla.",
+                font=(styles.FUENTE, styles.TAM_TEXTO), text_color=styles.COLOR_TEXTO_SECUNDARIO,
+            ).pack(pady=20)
+            return
+
+        # Cabecera
+        cabecera = ctk.CTkFrame(self._frame_col, fg_color="#EDF2FB", corner_radius=8)
+        cabecera.pack(fill="x", padx=4, pady=(2, 4))
+        ctk.CTkLabel(cabecera, text="Incluir", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
+                     text_color=styles.COLOR_TEXTO, width=70).pack(side="left", padx=(12, 4), pady=6)
+        ctk.CTkLabel(cabecera, text="Columna de notas", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
+                     text_color=styles.COLOR_TEXTO, width=300, anchor="w").pack(side="left", pady=6)
+        if modo == "pesos":
+            ctk.CTkLabel(cabecera, text="Porcentaje (%)", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
+                         text_color=styles.COLOR_TEXTO, width=130).pack(side="left", padx=(20, 0), pady=6)
+
+        for i, col in enumerate(self._column_config.columnas):
+            fila = ctk.CTkFrame(self._frame_col, fg_color="transparent")
+            fila.pack(fill="x", padx=4, pady=2)
+            self._col_rows[i] = fila
+
+            var_chk = tk.BooleanVar(value=col.get("incluida", True))
+            self._chk_col[i] = var_chk
+            ctk.CTkCheckBox(
+                fila, text="", variable=var_chk, width=60,
+                command=lambda idx=i: self._on_toggle_col(idx),
+            ).pack(side="left", padx=(14, 4))
+
+            nombre = col.get("nombre") or f"Área Trabajo {i+1}"
+            ctk.CTkLabel(
+                fila, text=nombre, font=(styles.FUENTE, styles.TAM_TEXTO),
+                text_color=styles.COLOR_TEXTO, width=290, anchor="w",
+            ).pack(side="left", padx=(0, 8))
+
+            if modo == "pesos":
+                var_peso = tk.StringVar(value=_fmt_peso(col.get("peso")))
+                self._peso_col[i] = var_peso
+                entrada = ctk.CTkEntry(
+                    fila, textvariable=var_peso, width=110, height=30,
+                    font=(styles.FUENTE, styles.TAM_TEXTO),
+                    fg_color=styles.COLOR_FONDO_SECUNDARIO,
+                    border_color="#D5DEEF",
+                )
+                entrada.pack(side="left", padx=(14, 0))
+                estado = "normal" if col.get("incluida", True) else "disabled"
+                entrada.configure(state=estado)
+            else:
+                # En simple no se muestran pesos
+                ctk.CTkLabel(fila, text="", width=130).pack(side="left")
+
+        self._actualizar_resumen_pesos()
+
+    def _on_modo_changed(self):
+        """Reconstruye el formulario cuando la usuaria cambia simple ↔ pesos."""
+        self._reconstruir_formulario_columnas()
+
+    def _on_toggle_col(self, idx):
+        """Habilita/deshabilita el campo de peso cuando se marca una columna."""
+        if idx in self._peso_col and idx in self._col_rows:
+            # Buscar la entrada dentro de la fila (es el único CTkEntry)
+            fila = self._col_rows[idx]
+            for w in fila.winfo_children():
+                if isinstance(w, ctk.CTkEntry):
+                    w.configure(
+                        state="normal" if self._chk_col[idx].get() else "disabled"
+                    )
+        self._actualizar_resumen_pesos()
+
+    def _actualizar_resumen_pesos(self):
+        """Muestra la suma actual de porcentajes (y avisa si no llega a 100)."""
+        modo = self._var_modo.get()
+        if modo != "pesos":
+            self._label_pesos.configure(text="")
+            return
+        incluidas = [
+            i for i, var in self._chk_col.items() if var.get()
+        ]
+        if not incluidas:
+            self._label_pesos.configure(
+                text="Marcá al menos una columna para calcular la nota.",
+                text_color=styles.COLOR_ROJO,
+            )
+            return
+        total = 0.0
+        for i in incluidas:
+            try:
+                total += float((self._peso_col[i].get() or "").replace(",", "."))
+            except ValueError:
+                pass
+        if abs(total - 100.0) < 0.01:
+            texto = f"Suma de porcentajes: {total:.1f}% ✓"
+            color = styles.COLOR_TEXTO_SECUNDARIO
+        else:
+            texto = f"Suma de porcentajes: {total:.1f}% (debe sumar 100%)"
+            color = styles.COLOR_ROJO if incluidas else styles.COLOR_TEXTO_SECUNDARIO
+        self._label_pesos.configure(text=texto, text_color=color)
+
+    def _guardar_config_y_generar(self):
+        """Valida la configuración y, si es correcta, pasa a generar el Excel."""
+        if not self._validar_configuracion():
+            return
+        self._generar_excel()
+
+    def _validar_configuracion(self) -> bool:
+        """
+        Lee el formulario, actualiza self._column_config y valida:
+
+        - Al menos una columna marcada.
+        - En modo pesos: cada columna marcada tiene un porcentaje numérico
+          >= 0, y la suma da ≈ 100.
+        Devuelve True si todo está OK; si no, muestra un error amigable y
+        devuelve False.
+        """
+        por_curso, orden = agrupar_por_curso(self.planillas)
+        primer_curso = orden[0]
+        enc = por_curso[primer_curso][0]["encabezado"]
+        estudiantes = combinar_estudiantes(por_curso[primer_curso])
+        n_areas = generar_excel_notas.calcular_n_areas(enc, estudiantes)
+
+        # Sincronizar: si el número de columnas cambió, regenerar por defecto
+        config = self._column_config
+        if config is None or len(config.columnas) != n_areas:
+            config = ColumnConfig.crear_desde_planilla(n_areas)
+            self._column_config = config
+
+        modo = self._var_modo.get()
+
+        columnas = []
+        for i in range(n_areas):
+            col_original = (
+                self._column_config.columnas[i]
+                if i < len(self._column_config.columnas)
+                else {}
+            )
+            incl = self._chk_col[i].get() if i in self._chk_col else col_original.get("incluida", True)
+            peso = col_original.get("peso", 0)
+            if i in self._peso_col:
+                texto = (self._peso_col[i].get() or "").strip()
+                if texto:
+                    try:
+                        peso = float(texto.replace(",", "."))
+                    except ValueError:
+                        messagebox.showerror(
+                            "Porcentaje inválido",
+                            f"El porcentaje de la columna \"{col_original.get('nombre', f'Área Trabajo {i+1}')}\" "
+                            "no es un número válido. Usá punto o coma para decimales (ej. 33.3).",
+                        )
+                        return False
+            columnas.append({
+                "nombre": col_original.get("nombre") or f"Área Trabajo {i+1}",
+                "incluida": bool(incl),
+                "peso": peso,
+            })
+
+        # ── Validaciones ──
+        seleccionadas = [c for c in columnas if c["incluida"]]
+        if not seleccionadas:
+            messagebox.showerror(
+                "Falta elegir columnas",
+                "Marcá al menos una columna de notas para calcular la definitiva.",
+            )
+            return False
+
+        if modo == "pesos":
+            for c in seleccionadas:
+                if c["peso"] < 0:
+                    messagebox.showerror(
+                        "Porcentaje inválido",
+                        f"El porcentaje de \"{c['nombre']}\" no puede ser negativo.",
+                    )
+                    return False
+            total = sum(c["peso"] for c in seleccionadas)
+            if abs(total - 100.0) > 0.01:
+                messagebox.showerror(
+                    "Los porcentajes no suman 100",
+                    f"Los porcentajes suman {total:.1f}% y deben sumar 100%. "
+                    "Revisá los valores e intentá de nuevo.",
+                )
+                return False
+
+        self._column_config = ColumnConfig(modo=modo, columnas=columnas)
+        return True
+
     def _generar_excel(self):
         # Aplicar las correcciones manuales de la pantalla de revisión.
         self._aplicar_periodo_seleccionado()
@@ -601,7 +915,9 @@ class App(ctk.CTk):
             app_config.escribir_log(f"No se pudo guardar la carpeta de salida: {e!r}")
 
         try:
-            generar_excel_notas.generar_excel_asignatura(self.planillas, ruta)
+            generar_excel_notas.generar_excel_asignatura(
+                self.planillas, ruta, column_config=self._column_config
+            )
         except ValueError as e:
             # W-A Part 1: periodo inválido detectado por el generador (guard).
             # Mensaje amigable nombrando el curso, sin traceback.
@@ -791,3 +1107,17 @@ def _parse_celda(texto):
 def _clear_tooltip(entrada, es_dudoso):
     """Sin tooltips por ahora: la celda amarilla ya comunica la duda."""
     _ = es_dudoso
+
+
+def _fmt_peso(valor):
+    """Formatea un peso (porcentaje) para mostrarlo en el formulario.
+
+    Sin decimales si es entero (40 -> "40"), con un decimal si no (33.3 -> "33.3").
+    """
+    try:
+        num = float(valor)
+    except (TypeError, ValueError):
+        return ""
+    if num.is_integer():
+        return str(int(num))
+    return f"{num:.1f}"

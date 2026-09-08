@@ -1,0 +1,281 @@
+"""
+Tests de la configuración de cálculo (ColumnConfig): columnas seleccionables
+y promedios con pesos.
+
+Cubre:
+- Creación de la config por defecto desde una planilla.
+- Fórmulas del modo simple con columnas seleccionadas.
+- Fórmulas del modo pesos con pesos que suman 100 y que no suman 100.
+- Generación del Excel end-to-end con ambas configuraciones.
+- Que el modo legacy (sin ColumnConfig) sigue generando la fórmula histórica.
+
+Uso (desde la raíz del proyecto):
+    python -m tests.test_generar_excel_columnas_config
+"""
+
+import os
+import sys
+import tempfile
+import unittest
+
+# La raíz del proyecto se agrega al path para poder importar el paquete excel/.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+import openpyxl  # noqa: E402
+
+import excel.generar_excel_notas as generador  # noqa: E402
+from excel.generar_excel_notas import ColumnConfig  # noqa: E402
+
+
+def _planilla(area_por_alumno, n_area_trabajo=None, periodo=3):
+    """Construye una planilla de prueba (misma forma que en los otros tests)."""
+    encabezado = {
+        "institucion": "INSTITUCION DEMO",
+        "sede": "SEDE",
+        "año_lectivo": "2026",
+        "jornada": "MAÑANA",
+        "grupo": "0302",
+        "asignatura": "MATEMATICAS",
+        "docente": "DOCENTE DEMO",
+        "periodo": periodo,
+    }
+    if n_area_trabajo is not None:
+        encabezado["n_area_trabajo"] = n_area_trabajo
+
+    estudiantes = []
+    for i, notas in enumerate(area_por_alumno, start=1):
+        retirado = notas is None
+        estudiantes.append({
+            "no": i,
+            "nombre": f"ALUMNO {i}",
+            "ev_anteriores": [45, 45] if periodo > 1 else [],
+            "area_trabajo": notas if not retirado else None,
+            "retirado": retirado,
+            "revisar": [False] * (len(notas) if not retirado else 0),
+        })
+    return {"encabezado": encabezado, "estudiantes": estudiantes}
+
+
+def _hoja_cargada(planilla, column_config):
+    """Genera el Excel de la planilla con la config y devuelve la hoja activa."""
+    directorio = tempfile.mkdtemp(prefix="notas_config_")
+    ruta = os.path.join(directorio, "salida.xlsx")
+    generador.generar_excel_planilla(planilla, ruta, column_config=column_config)
+    wb = openpyxl.load_workbook(ruta)
+    return wb[wb.sheetnames[0]]
+
+
+def _fila_header(ws):
+    """Ubica la fila donde empieza la tabla (la que tiene 'No.' y 'Nombre')."""
+    for r in range(1, 20):
+        if ws.cell(row=r, column=1).value == "No." and \
+           ws.cell(row=r, column=2).value == "Nombre del Alumno":
+            return r
+    raise AssertionError("No se encontró la fila de encabezado de la tabla")
+
+
+class TestColumnConfigBase(unittest.TestCase):
+    """ColumnConfig: creación, selección y validación básica."""
+
+    def test_crear_desde_planilla_simple_todas_incluidas(self):
+        cfg = ColumnConfig.crear_desde_planilla(4)
+        self.assertEqual(cfg.modo, "simple")
+        self.assertEqual(len(cfg.columnas), 4)
+        self.assertTrue(all(c["incluida"] for c in cfg.columnas))
+        self.assertEqual(cfg.columnas_seleccionadas, [0, 1, 2, 3])
+        self.assertEqual(cfg.n_columnas_seleccionadas, 4)
+        # Peso por defecto reparte 100 en partes iguales
+        self.assertEqual(cfg.columnas[0]["peso"], 25.0)
+
+    def test_es_pesado_solo_con_mas_de_una_columna(self):
+        cfg = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "A1", "incluida": True, "peso": 100},
+        ])
+        # Una sola columna: no es un promedio pesado real (usa el valor directo)
+        self.assertFalse(cfg.es_pesado())
+
+        cfg2 = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "A1", "incluida": True, "peso": 60},
+            {"nombre": "A2", "incluida": True, "peso": 40},
+        ])
+        self.assertTrue(cfg2.es_pesado())
+
+    def test_pesos_suman_cien_con_tolerancia(self):
+        cfg = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "A1", "incluida": True, "peso": 33.3},
+            {"nombre": "A2", "incluida": True, "peso": 33.3},
+            {"nombre": "A3", "incluida": True, "peso": 33.4},
+        ])
+        self.assertTrue(cfg.pesos_suman_cien())
+
+    def test_pesos_no_suman_cien(self):
+        cfg = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "A1", "incluida": True, "peso": 30},
+            {"nombre": "A2", "incluida": True, "peso": 30},
+        ])
+        self.assertFalse(cfg.pesos_suman_cien())
+
+    def test_roundtrip_dict(self):
+        cfg = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "A1", "incluida": True, "peso": 60},
+            {"nombre": "A2", "incluida": False, "peso": 0},
+        ])
+        cfg2 = ColumnConfig.from_dict(cfg.to_dict())
+        self.assertEqual(cfg2.modo, "pesos")
+        self.assertEqual(cfg2.columnas, cfg.columnas)
+
+    def test_modo_invalido_cae_a_simple(self):
+        cfg = ColumnConfig(modo="raro")
+        self.assertEqual(cfg.modo, "simple")
+
+
+class TestFormulasUnicas(unittest.TestCase):
+    """_formula_definitiva: las fórmulas según la configuración."""
+
+    def _f(self, column_config):
+        # Periodo 3 => ev previas en C y D, área arranca en E (col_at1=5).
+        # 5 columnas de área => col_def = 5+5 = 10, col_def_menos1 = 9.
+        return generador._formula_definitiva(5, 9, 11, 5, column_config)
+
+    def test_legacy_sin_config_sum_todas(self):
+        self.assertEqual(
+            self._f(None),
+            '=IFERROR(SUM(E11:I11)/5,"")',
+        )
+
+    def test_simple_con_todas_average_rango_completo(self):
+        cfg = ColumnConfig.crear_desde_planilla(5)
+        self.assertEqual(
+            self._f(cfg),
+            '=IFERROR(AVERAGE(E11,F11,G11,H11,I11),"")',
+        )
+
+    def test_simple_solo_columnas_seleccionadas(self):
+        # Solo columnas 1 y 3 (0-based: índices 0 y 2) -> E y G
+        cfg = ColumnConfig(
+            columnas=[{"nombre": "A1", "incluida": True, "peso": 50},
+                      {"nombre": "A2", "incluida": False, "peso": 0},
+                      {"nombre": "A3", "incluida": True, "peso": 50},
+                      {"nombre": "A4", "incluida": False, "peso": 0},
+                      {"nombre": "A5", "incluida": False, "peso": 0}],
+        )
+        self.assertEqual(
+            self._f(cfg),
+            '=IFERROR(AVERAGE(E11,G11),"")',
+        )
+
+    def test_simple_una_sola_columna_seleccionada_referencia_directa(self):
+        cfg = ColumnConfig(columnas=[
+            {"nombre": "A1", "incluida": True, "peso": 100},
+            {"nombre": "A2", "incluida": False, "peso": 0},
+            {"nombre": "A3", "incluida": False, "peso": 0},
+            {"nombre": "A4", "incluida": False, "peso": 0},
+            {"nombre": "A5", "incluida": False, "peso": 0},
+        ])
+        self.assertEqual(self._f(cfg), '=IFERROR(E11,"")')
+
+    def test_ninguna_columna_seleccionada(self):
+        cfg = ColumnConfig(columnas=[
+            {"nombre": "A1", "incluida": False, "peso": 0},
+            {"nombre": "A2", "incluida": False, "peso": 0},
+        ])
+        self.assertEqual(self._f(cfg), "")
+
+    def test_pesos_suman_cien(self):
+        cfg = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "A1", "incluida": True, "peso": 60},
+            {"nombre": "A2", "incluida": True, "peso": 40},
+            {"nombre": "A3", "incluida": False, "peso": 0},
+            {"nombre": "A4", "incluida": False, "peso": 0},
+            {"nombre": "A5", "incluida": False, "peso": 0},
+        ])
+        # 60*E + 40*F, todo /100
+        self.assertEqual(
+            self._f(cfg),
+            '=IFERROR((E11*60+F11*40)/100,"")',
+        )
+
+    def test_pesos_no_suman_cien_se_normaliza(self):
+        cfg = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "A1", "incluida": True, "peso": 30},
+            {"nombre": "A2", "incluida": True, "peso": 30},
+            {"nombre": "A3", "incluida": False, "peso": 0},
+            {"nombre": "A4", "incluida": False, "peso": 0},
+            {"nombre": "A5", "incluida": False, "peso": 0},
+        ])
+        # 30*E + 30*F, todo /(30+30) — así la nota queda en la misma escala.
+        self.assertEqual(
+            self._f(cfg),
+            '=IFERROR((E11*30+F11*30)/(30+30),"")',
+        )
+
+    def test_pesos_una_columna_ref_directa(self):
+        cfg = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "A1", "incluida": True, "peso": 100},
+            {"nombre": "A2", "incluida": False, "peso": 0},
+        ])
+        self.assertEqual(self._f(cfg), '=IFERROR(E11,"")')
+
+
+class TestExcelEndToEndConConfig(unittest.TestCase):
+    """El Excel final refleja la configuración elegida."""
+
+    def test_simple_con_columnas_seleccionadas(self):
+        planilla = _planilla(
+            [[40, 50, 60, 70], [41, 51, 61, 71]],
+            n_area_trabajo=4,
+        )
+        cfg = ColumnConfig(columnas=[
+            {"nombre": "Área Trabajo 1", "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 2", "incluida": False, "peso": 0},
+            {"nombre": "Área Trabajo 3", "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 4", "incluida": False, "peso": 0},
+        ])
+        ws = _hoja_cargada(planilla, cfg)
+        # Periodo 3 -> ev previas en C y D; área arranca en E(5)..H(8);
+        # definitiva en I(9). Alumno 1 = fila header + 1.
+        hr = _fila_header(ws)
+        fila1 = hr + 1
+        # Solo columnas 1 y 3 (0-based: índices 0 y 2) -> E y G
+        self.assertEqual(ws.cell(row=fila1, column=9).value,
+                         '=IFERROR(AVERAGE(E{f},G{f}),"")'.format(f=fila1))
+        # La columna excluida conserva su nota, pero no entra a la fórmula.
+        self.assertEqual(ws.cell(row=fila1, column=6).value, 50)
+
+    def test_pesos_end_to_end(self):
+        planilla = _planilla(
+            [[40, 50], [41, 51]],
+            n_area_trabajo=2,
+        )
+        cfg = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "Área Trabajo 1", "incluida": True, "peso": 60},
+            {"nombre": "Área Trabajo 2", "incluida": True, "peso": 40},
+        ])
+        ws = _hoja_cargada(planilla, cfg)
+        # Periodo 3 -> ev previas en C y D; área E(5),F(6); definitiva en G(7).
+        hr = _fila_header(ws)
+        fila1 = hr + 1
+        self.assertEqual(ws.cell(row=fila1, column=7).value,
+                         '=IFERROR((E{f}*60+F{f}*40)/100,"")'.format(f=fila1))
+
+        # La info del Excel indica el modo de cálculo y los pesos.
+        valores_info = [ws.cell(row=r, column=1).value for r in range(1, hr)]
+        self.assertIn("Modo de cálculo", valores_info)
+        self.assertIn("Pesos", valores_info)
+
+    def test_legacy_sigue_generando_formula_historica(self):
+        planilla = _planilla(
+            [[40, 50], [41, 51]],
+            n_area_trabajo=2,
+        )
+        ws = _hoja_cargada(planilla, None)
+        # Sin config: la fórmula histórica SUM/2 (periodo 3 -> área en E,F,
+        # definitiva en G). Sin info extra, header en 10, alumno 1 en 11.
+        self.assertEqual(ws.cell(row=11, column=7).value,
+                         '=IFERROR(SUM(E11:F11)/2,"")')
+
+
+if __name__ == "__main__":
+    unittest.main()
