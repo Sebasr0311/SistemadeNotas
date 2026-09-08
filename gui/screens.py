@@ -955,7 +955,9 @@ class App(ctk.CTk):
           de porcentaje debajo de cada checkbox.
         - Fila 1 (cabecera): "No.", "Nombre", el nombre de cada candidata y
           "Definitiva" en gris (no seleccionable: se calcula).
-        - Filas 2..~10: los primeros estudiantes con sus valores.
+        - Filas 2..N: TODOS los estudiantes de la planilla con sus valores
+          (scroll vertical del contenedor externo; scroll horizontal para la
+          cantidad de columnas).
 
         La "Definitiva" se muestra pero nunca se marca. Los estados de widgets
         son POR FORMA. Las columnas candidatas salen de la columnas de la
@@ -989,20 +991,30 @@ class App(ctk.CTk):
         planillas_forma = self._planillas_forma.get(clave_forma, [])
         muestra = []
         if planillas_forma:
-            muestra = (planillas_forma[0].get("estudiantes") or [])[:10]
+            # TODOS los estudiantes de la planilla: el scroll vertical del
+            # contenedor externo deja ver la lista completa.
+            muestra = planillas_forma[0].get("estudiantes") or []
 
         ancho_no = 38
         ancho_nombre = 150
         ancho_cand = 58
         ancho_def = 76
 
+        # Contenedor con scroll vertical (todos los estudiantes) que envuelve
+        # la tabla con scroll horizontal (todas las columnas candidatas).
+        contenedor = ctk.CTkScrollableFrame(
+            frame_col, orientation="vertical",
+            fg_color="transparent", corner_radius=0,
+        )
+        contenedor.pack(fill="both", expand=True, pady=(2, 2))
+
         # Tabla con scroll horizontal interno para cuando hay muchas columnas.
         tabla = ctk.CTkScrollableFrame(
-            frame_col, orientation="horizontal", height=300,
+            contenedor, orientation="horizontal",
             fg_color=styles.COLOR_BLANCO, corner_radius=8,
             border_width=1, border_color="#E3E9F5",
         )
-        tabla.pack(fill="both", expand=True, pady=(2, 2))
+        tabla.pack(fill="both", expand=True, padx=1, pady=1)
         for g in range(2 + n_cand + 1):
             if g == 0:
                 ancho = ancho_no
