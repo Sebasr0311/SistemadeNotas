@@ -204,7 +204,7 @@ def _numero_plausible(valor):
     return None, True
 
 
-def _normalizar_area(valores, revisar_flags):
+def _normalizar_area(valores, revisar_flags, n_area_declarado=None):
     """
     Devuelve (area_trabajo, revisar) con TANTAS celdas como valores traiga el
     modelo (hasta MAX_N_AREAS = 16, el rango válido del spec v2: de 1 a 16 notas
@@ -213,8 +213,24 @@ def _normalizar_area(valores, revisar_flags):
     - Celdas en blanco -> None (sin marcar revisión).
     - Valor ambiguo (dígitos separados) o no numérico -> None + marcar revisión.
     - Fuera de rango (no entre 0 y 100) -> marcar revisión True y dejar el valor.
+
+    Cuando `n_area_declarado` no es None (la planilla declara cuántas columnas
+    de nota tiene), la longitud del resultado se ALINEA a ese declarado:
+      * Si el modelo devuelve MENOS valores (colapso de la lista: el modelo
+        suele compactar los nulls posicionales al final), se rellena con None
+        hasta `n_area_declarado` y se marca TODA la fila revisar=True: no
+        podemos reconstruir si la celda vacía era interna, y el orden pudo
+        desplazarse, así que la usuaria debe verificar contra la planilla.
+      * Si devuelve MÁS valores, se trunca a `n_area_declarado` y también se
+        marca TODA la fila revisar=True (sobran valores -> sospechoso).
+    Se preservan las revisiones que ya traiga el modelo (nunca se bajan a
+    False; sólo se agregan True).
     """
     if not valores:
+        # Sin valores: si hay declarado, devolvemos esa cantidad de None con
+        # toda la fila en revisión (faltan datos de una columna declarada).
+        if n_area_declarado:
+            return [None] * n_area_declarado, [True] * n_area_declarado
         return [], []
     # Tope de seguridad: nunca más de MAX_N_AREAS celdas. La validación de la
     # planilla (ver _normalizar_planilla) es la que cubre la consistencia con
@@ -232,6 +248,23 @@ def _normalizar_area(valores, revisar_flags):
             revisar[i] = True
         if num is not None and not (RANGO_NOTA[0] <= num <= RANGO_NOTA[1]):
             revisar[i] = True
+
+    # Alineación posicional contra el declarado (anti-colapso).
+    if n_area_declarado and n_area_declarado > 0:
+        n = min(n_area_declarado, MAX_N_AREAS)
+        if len(area) != n:
+            # Mismatch (lista más corta o más larga que el declarado): toda la
+            # fila es sospechosa de corrimiento -> revisar True en cada celda.
+            # Se rellena con None (cortas) o se trunca (largas) para el ancho.
+            for k in range(len(revisar)):
+                revisar[k] = True
+            if len(area) < n:
+                faltan = n - len(area)
+                area.extend([None] * faltan)
+                revisar.extend([True] * faltan)
+            else:
+                area = area[:n]
+                revisar = revisar[:n]
     return area, revisar
 
 
@@ -366,6 +399,11 @@ def _normalizar_planilla(datos: dict) -> dict:
 
     n_ev_anteriores = periodo - 1
     estudiantes = []
+    # Mismatch de longitud "area_trabajo" contra n_area_declarado (sobre el
+    # CRUDO del modelo): _normalizar_area ahora rellena/trunca al declarado, así
+    # que una comparación post-normalización nunca lo detectaría. Se captura acá
+    # para marcar revisar_planilla (ver validación al final).
+    areas_inconsistentes = False
     # Flag detectado sobre el CRUDO del modelo: si el encabezado declara
     # títulos "otras" y algún alumno no retirado trae OTRA cantidad de valores,
     # la planilla se marca para revisión manual (ver validación al final).
@@ -404,6 +442,14 @@ def _normalizar_planilla(datos: dict) -> dict:
         # actúa la heurística de _normalizar_area.
         at_modelo = est.get("area_trabajo")
         n_at = len(at_modelo) if isinstance(at_modelo, list) else 0
+        # Mismatch sobre el CRUDO: el modelo devolvió otra cantidad de notas
+        # que la declarada (colapso de nulls, sobran valores, etc.). Se marca
+        # revisar_planilla; la fila ya va con revisar=True por _normalizar_area.
+        if (
+            n_area_declarado is not None
+            and n_at != n_area_declarado
+        ):
+            areas_inconsistentes = True
         rev_flags = [False] * n_at
         if isinstance(rev, list):
             for i in range(n_at):
@@ -415,7 +461,9 @@ def _normalizar_planilla(datos: dict) -> dict:
             # queda sin revisar, con la MISMA longitud dinámica.
             rev_flags = ([rev == 1] + [False] * (n_at - 1)) if n_at > 0 else []
 
-        area, revisar = _normalizar_area(est.get("area_trabajo"), rev_flags)
+        area, revisar = _normalizar_area(
+            est.get("area_trabajo"), rev_flags, n_area_declarado
+        )
         ev, revisar_ev = _normalizar_ev(est.get("ev_anteriores"), n_ev_anteriores)
 
         # Columnas "otras": flags del modelo con la MISMA coerción que "revisar"
@@ -470,13 +518,10 @@ def _normalizar_planilla(datos: dict) -> dict:
     revisar_planilla = False
     # 1) Cantidad de notas: si el encabezado declara n_area_trabajo y algún
     #    estudiante no retirado trae otra cantidad de notas -> revisión manual.
-    if n_area_declarado is not None:
-        for e in estudiantes:
-            if e.get("retirado"):
-                continue
-            if len(e.get("area_trabajo") or []) != n_area_declarado:
-                revisar_planilla = True
-                break
+    #    Se detecta sobre el CRUDO del modelo (`areas_inconsistentes`), porque
+    #    _normalizar_area ya rellena/trunca la lista al declarado.
+    if n_area_declarado is not None and areas_inconsistentes:
+        revisar_planilla = True
     # 2) Cantidad de alumnos no retirados fuera del rango sano -> revisión.
     activos = [e for e in estudiantes if not e.get("retirado")]
     if not (MIN_ESTUDIANTES_SANOS <= len(activos) <= MAX_ESTUDIANTES_SANOS):
@@ -779,6 +824,16 @@ REGLAS IMPORTANTES:
      traer EXACTAMENTE n_area_trabajo valores: si el encabezado tiene 4
      columnas, el arreglo de cada alumno tiene 4 posiciones (las vacías van
      como null), aunque ese alumno no tenga todas las notas.
+     REGLA ANTI-COMPACTACIÓN: NUNCA compactes los nulls al final. Cada null
+     debe ir EN SU POSICIÓN ORIGINAL. Ejemplo: planilla de 4 columnas, alumno
+     con notas "45, 40, celda vacía, 50" → el arreglo DEBE ser
+     [45, 40, null, 50]. NUNCA [45, 40, 50] (3 valores, colapsado) ni
+     [45, 40, 50, null] (null movido al final). La longitud del arreglo DEBE
+     ser exactamente n_area_trabajo para TODOS los alumnos, sin excepción.
+     Si una celda es ilegible (mancha, tachón, símbolo como "+", letra, o
+     cualquier marca que no sea un número claro), poné null en esa posición y
+     el correspondiente true en "revisar" — nunca inventes un número para
+     cubrir una celda ilegible.
    - Nunca asumas que dos planillas del mismo curso y periodo tienen la misma
      cantidad de columnas de notas. Cada planilla se cuenta de forma
      independiente, aunque sea del mismo curso y periodo que otra que ya
