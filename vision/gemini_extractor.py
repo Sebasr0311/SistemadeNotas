@@ -214,6 +214,24 @@ def _normalizar_area(valores, revisar_flags, n_area_declarado=None):
     - Valor ambiguo (dígitos separados) o no numérico -> None + marcar revisión.
     - Fuera de rango (no entre 0 y 100) -> marcar revisión True y dejar el valor.
 
+    FORMATO POSICIONAL (spec v3): `valores` además puede ser una lista de
+    objetos {"col": N, "valor": X, "revisar": bool(opcional)} — la POSICIÓN de
+    cada celda es explícita, de modo que si el modelo omite una celda vacía
+    (colapso de la lista), las notas NO se corren de columna: cada valor se
+    ubica en su col real y las celdas faltantes quedan None. Se mantiene la
+    retrocompatibilidad con la lista plana (los dicts y las listas pueden
+    convivir en una misma planilla, y cada estudiante se resuelve por
+    separado). En formato posicional, `revisar_flags` puede ser:
+      * lista plana legacy, alineada por POSICIÓN cuando su largo es N (la
+        cantidad declarada/observada);
+      * lista plana alineada por OBJETO cuando su largo es el número de
+        objetos (el flag k corresponde al objeto k);
+      * lista de dicts {"col": N, "revisar": bool};
+      * el campo "revisar" dentro de cada objeto (prioritario).
+    Inconsistencias posicionales (col fuera de rango o duplicada) marcan TODA
+    la fila revisar=True y son detectadas además en _normalizar_planilla para
+    marcar revisar_planilla.
+
     Cuando `n_area_declarado` no es None (la planilla declara cuántas columnas
     de nota tiene), la longitud del resultado se ALINEA a ese declarado:
       * Si el modelo devuelve MENOS valores (colapso de la lista: el modelo
@@ -226,6 +244,16 @@ def _normalizar_area(valores, revisar_flags, n_area_declarado=None):
     Se preservan las revisiones que ya traiga el modelo (nunca se bajan a
     False; sólo se agregan True).
     """
+    # Formato posicional: lista de dicts con "col".
+    if (
+        isinstance(valores, list)
+        and valores
+        and isinstance(valores[0], dict)
+        and "col" in valores[0]
+    ):
+        return _normalizar_area_posicional(valores, revisar_flags,
+                                           n_area_declarado)
+
     if not valores:
         # Sin valores: si hay declarado, devolvemos esa cantidad de None con
         # toda la fila en revisión (faltan datos de una columna declarada).
@@ -265,6 +293,109 @@ def _normalizar_area(valores, revisar_flags, n_area_declarado=None):
             else:
                 area = area[:n]
                 revisar = revisar[:n]
+    return area, revisar
+
+
+def _normalizar_area_posicional(valores, revisar_flags, n_area_declarado=None):
+    """
+    Formato posicional v3: `valores` es una lista de dicts con "col" (1-based,
+    posición REAL de la celda en la planilla) y "valor" (nota o null). Cada
+    valor se ubica en su col, así el colapso de celdas vacías nunca corre las
+    notas de columna. Celdas omitidas -> None, sin marca extra (es el
+    comportamiento normal del formato, no un colapso).
+
+    Devuelve (area, revisar) de largo n:
+      n = n_area_declarado si viene; si no, max(col) observado (tope
+      MAX_N_AREAS).
+    """
+    n = MAX_N_AREAS
+    col_max = 0
+    for e in valores:
+        c = e.get("col")
+        if isinstance(c, bool) or not isinstance(c, (int, float)):
+            continue
+        col_max = max(col_max, int(c))
+    if n_area_declarado and n_area_declarado > 0:
+        n = min(int(n_area_declarado), MAX_N_AREAS)
+    else:
+        n = min(max(col_max, len(valores)), MAX_N_AREAS)
+
+    area = [None] * n
+    revisar = [False] * n
+    # Marca de fila completa cuando hay col inválida o duplicada.
+    fila_inconsistente = False
+    col_vista = set()
+
+    # Aplicar el "revisar" de cada objeto (prioritario) antes de las heurísticas.
+    for e in valores:
+        if not isinstance(e, dict):
+            continue
+        c = e.get("col")
+        if isinstance(c, bool) or not isinstance(c, (int, float)):
+            fila_inconsistente = True
+            continue
+        c = int(c)
+        if c < 1 or c > n:
+            fila_inconsistente = True
+            continue
+        if c in col_vista:
+            fila_inconsistente = True
+        col_vista.add(c)
+        r_flag, r_conf = _coercion_bool(e.get("revisar"))
+        if r_conf and r_flag:
+            revisar[c - 1] = True
+
+    # Flags legacy externos: aplicar por posición o por objeto según el largo.
+    if isinstance(revisar_flags, list):
+        if revisar_flags and isinstance(revisar_flags[0], dict):
+            # Dicts {"col": N, "revisar": bool} -> por posición.
+            for e in revisar_flags:
+                c = e.get("col")
+                if isinstance(c, bool) or not isinstance(c, (int, float)):
+                    continue
+                c = int(c)
+                if 1 <= c <= n:
+                    r_flag, r_conf = _coercion_bool(e.get("revisar"))
+                    if r_conf and r_flag:
+                        revisar[c - 1] = True
+        elif len(revisar_flags) == n and n != len(valores):
+            # Lista plana con largo N -> alineada por posición.
+            for i, f in enumerate(revisar_flags):
+                r_flag, r_conf = _coercion_bool(f)
+                if r_conf and r_flag:
+                    revisar[i] = True
+        elif len(revisar_flags) == len(valores):
+            # Lista plana con largo = objetos -> flag k para el objeto k.
+            for i, f in enumerate(revisar_flags):
+                r_flag, r_conf = _coercion_bool(f)
+                if r_conf and r_flag:
+                    c = valores[i].get("col")
+                    if isinstance(c, bool) or not isinstance(c, (int, float)):
+                        continue
+                    c = int(c)
+                    if 1 <= c <= n:
+                        revisar[c - 1] = True
+
+    # Ubicar valores y heurísticas por celda.
+    for e in valores:
+        if not isinstance(e, dict):
+            continue
+        c = e.get("col")
+        if isinstance(c, bool) or not isinstance(c, (int, float)):
+            continue
+        c = int(c)
+        if c < 1 or c > n:
+            continue
+        v = e.get("valor")
+        num, confiable = _numero_plausible(v)
+        area[c - 1] = num
+        if not confiable and v not in (None, ""):
+            revisar[c - 1] = True
+        if num is not None and not (RANGO_NOTA[0] <= num <= RANGO_NOTA[1]):
+            revisar[c - 1] = True
+
+    if fila_inconsistente:
+        revisar = [True] * n
     return area, revisar
 
 
@@ -442,13 +573,39 @@ def _normalizar_planilla(datos: dict) -> dict:
         # actúa la heurística de _normalizar_area.
         at_modelo = est.get("area_trabajo")
         n_at = len(at_modelo) if isinstance(at_modelo, list) else 0
-        # Mismatch sobre el CRUDO: el modelo devolvió otra cantidad de notas
-        # que la declarada (colapso de nulls, sobran valores, etc.). Se marca
-        # revisar_planilla; la fila ya va con revisar=True por _normalizar_area.
-        if (
+        # Formato posicional v3 (spec v3): area_trabajo es una lista de objetos
+        # {"col": N, "valor": X}. La inconsistencia YA NO es la longitud (omitir
+        # una celda vacía es el comportamiento normal del formato), sino que una
+        # col caiga fuera del rango declarado o esté duplicada: en ese caso la
+        # planilla se marca para revisión manual (ver validación al final).
+        es_posicional = (
+            isinstance(at_modelo, list)
+            and n_at > 0
+            and isinstance(at_modelo[0], dict)
+            and "col" in at_modelo[0]
+        )
+        if es_posicional:
+            cols_vistos = set()
+            for ent in at_modelo:
+                c = ent.get("col")
+                if isinstance(c, bool) or not isinstance(c, (int, float)):
+                    areas_inconsistentes = True
+                    continue
+                c = int(c)
+                if (
+                    (n_area_declarado is not None and (c < 1 or c > n_area_declarado))
+                    or c in cols_vistos
+                ):
+                    areas_inconsistentes = True
+                cols_vistos.add(c)
+        elif (
             n_area_declarado is not None
             and n_at != n_area_declarado
         ):
+            # Mismatch sobre el CRUDO de formato plano: el modelo devolvió otra
+            # cantidad de notas que la declarada (colapso de nulls, sobran
+            # valores, etc.). Se marca revisar_planilla; la fila ya va con
+            # revisar=True por _normalizar_area.
             areas_inconsistentes = True
         rev_flags = [False] * n_at
         if isinstance(rev, list):
@@ -766,7 +923,7 @@ JSON válido (sin texto adicional, sin marcas de código), con esta estructura:
       "no": 1,
       "nombre": "APELLIDO NOMBRE",
       "ev_anteriores": [45, 45],
-      "area_trabajo": [40, 50],
+      "area_trabajo": [{"col": 1, "valor": 40}, {"col": 2, "valor": 50}],
       "otras_notas": [42],
       "retirado": false,
       "revisar": [false, false],
@@ -775,9 +932,12 @@ JSON válido (sin texto adicional, sin marcas de código), con esta estructura:
   ]
 }
 
-NOTA: el ejemplo muestra 2 áreas, pero el número REAL de valores de
-"area_trabajo" (y de "revisar") varía con la planilla: pueden ser de 1 a 16.
-Lee SIEMPRE la cantidad real de columnas, nunca fijes el tamaño.
+NOTA: el ejemplo muestra 2 áreas, pero el número REAL de columnas de
+"area_trabajo" varía con la planilla: pueden ser de 1 a 16. Lee SIEMPRE la
+cantidad real de columnas del encabezado (n_area_trabajo), nunca fijes el
+tamaño. El arreglo posicional solo incluye las celdas con contenido o marca
+ilegible del alumno: su largo NO tiene que coincidir con n_area_trabajo
+(cuando sobran celdas vacías, el arreglo es más corto, y eso está bien).
 
 REGLAS IMPORTANTES:
 
@@ -817,23 +977,26 @@ REGLAS IMPORTANTES:
    - "ev_anteriores" son las notas definitivas de periodos anteriores (una por
      cada columna que aparezca; si no hay columnas de periodos anteriores,
      devolvé un arreglo vacío []).
-   - "area_trabajo" son las notas manuscritas del periodo actual, UNA por cada
-     columna de notas que detectes en la planilla (de 1 a 16 valores, NUNCA
-     fijes la cantidad: leé exactamente cuántas columnas hay). Si una celda
-     está en blanco, pon null en esa posición. ATENCIÓN: cada alumno debe
-     traer EXACTAMENTE n_area_trabajo valores: si el encabezado tiene 4
-     columnas, el arreglo de cada alumno tiene 4 posiciones (las vacías van
-     como null), aunque ese alumno no tenga todas las notas.
-     REGLA ANTI-COMPACTACIÓN: NUNCA compactes los nulls al final. Cada null
-     debe ir EN SU POSICIÓN ORIGINAL. Ejemplo: planilla de 4 columnas, alumno
-     con notas "45, 40, celda vacía, 50" → el arreglo DEBE ser
-     [45, 40, null, 50]. NUNCA [45, 40, 50] (3 valores, colapsado) ni
-     [45, 40, 50, null] (null movido al final). La longitud del arreglo DEBE
-     ser exactamente n_area_trabajo para TODOS los alumnos, sin excepción.
+   - "area_trabajo" son las notas manuscritas del periodo actual, una entrada
+     POR CADA CELDA CON NOTA (o con una marca ilegible) del alumno, con su
+     POSICIÓN explícita: un arreglo de objetos {"col": número_de_columna,
+     "valor": nota_o_null}. Ejemplo con 4 columnas, alumno con notas
+     "45, 40, celda vacía, 50":
+       [{"col": 1, "valor": 45}, {"col": 2, "valor": 40},
+        {"col": 4, "valor": 50}]
+     La celda vacía (columna 3) NO se incluye en el arreglo: se deduce porque
+     falta y porque los objetos conservan su "col" real. NUNCA compactes los
+     valores y los corras de columna: si hay una celda vacía en el medio,
+     el siguiente objeto lleva "col": 4, NO "col": 3. Cada "col" es la
+     posición REAL de la celda en la planilla, de izquierda a derecha
+     empezando en 1. La cantidad de "col" nunca debe pasar de n_area_trabajo.
+     Si la celda está en blanco: simplemente omitila del arreglo (no pongas
+     "valor": null en una posición inventada, salvo que la celda tenga una
+     marca que no se pueda leer: ahí sí incluí {"col": N, "valor": null}).
      Si una celda es ilegible (mancha, tachón, símbolo como "+", letra, o
-     cualquier marca que no sea un número claro), poné null en esa posición y
-     el correspondiente true en "revisar" — nunca inventes un número para
-     cubrir una celda ilegible.
+     cualquier marca que no sea un número claro), poné {"col": N, "valor":
+     null} en esa posición y true en "revisar" — nunca inventes un número
+     para cubrir una celda ilegible.
    - Nunca asumas que dos planillas del mismo curso y periodo tienen la misma
      cantidad de columnas de notas. Cada planilla se cuenta de forma
      independiente, aunque sea del mismo curso y periodo que otra que ya
@@ -864,12 +1027,13 @@ REGLAS IMPORTANTES:
    - Si una celda está en blanco o tachada sin valor claro, devolvé null (nunca 0).
    - Si una nota fue corregida (tachada y reescrita), devolvé el valor VIGENTE
      (el reescrito), no el tachado.
-   - "revisar" es un arreglo de booleanos, uno por cada celda de "area_trabajo"
-     (la MISMA cantidad de valores).
-     Si NO estás completamente seguro de un dígito (letra ambigua, tachón difícil,
-     mancha), poné true en esa posición de "revisar" (y null en el valor si no podés
-     leerlo). Si estás seguro, pon false. Nunca inventes un valor dudoso para evitar
-     la revisión.
+- "revisar" es un arreglo de booleanos, uno por cada celda de "area_trabajo"
+      (en el MISMO orden: el flag k corresponde a la celda del objeto k, con su
+      "col").
+      Si NO estás completamente seguro de un dígito (letra ambigua, tachón difícil,
+      mancha), poné true en esa posición de "revisar" (y null en el valor si no podés
+      leerlo). Si estás seguro, pon false. Nunca inventes un valor dudoso para evitar
+      la revisión.
    - Las notas suelen ser números enteros o decimales (ej. 45, 40, 4.5, 50). Devolvé
      el número tal cual aparece en la planilla, sin cambiar su escala (si la nota es
      de 0 a 5, devolvé 4.5; si es de 0 a 100, devolvé 45).

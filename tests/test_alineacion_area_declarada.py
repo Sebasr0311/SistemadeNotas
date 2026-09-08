@@ -176,6 +176,253 @@ class TestNormalizarAreaConDeclarado(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------- #
+# FORMATO POSICIONAL: area_trabajo como [{"col": N, "valor": X}]
+# (contract v3). La posición de cada celda es explícita, así un colapso de la
+# lista (celdas vacías omitidas) NO corre las notas de columna.
+# ---------------------------------------------------------------------- #
+
+def _planilla_posicional(areas_pos, n_area_trabajo, revisar_s=None):
+    """Planilla cruda con formato posicional.
+
+    areas_pos: lista de listas de dicts {"col": N, "valor": X}.
+    revisar_s: flags "revisar" legacy (lista plana) si se quiere probar el
+    camino de compatibilidad (cuando el modelo no trae "revisar" por objeto).
+    """
+    if areas_pos and isinstance(areas_pos[0], list):
+        por_est = list(areas_pos)
+    else:
+        por_est = [list(areas_pos)] * 12
+    encabezado = {
+        "institucion": "I", "sede": "S", "año_lectivo": "2026",
+        "jornada": "M", "grupo": "0302", "asignatura": "A",
+        "docente": "D", "periodo": 3,
+    }
+    if n_area_trabajo is not None:
+        encabezado["n_area_trabajo"] = n_area_trabajo
+    estudiantes = []
+    for i, area in enumerate(por_est, start=1):
+        est = {
+            "no": i, "nombre": f"ALUMNO {i}",
+            "ev_anteriores": [45, 45],
+            # El área puede venir como dicts posicionales o como lista plana
+            # (formato mixto permitido): copiar tal cual para no mutar.
+            "area_trabajo": (
+                [dict(e) for e in area]
+                if area and isinstance(area[0], dict)
+                else list(area)
+            ),
+            "retirado": False,
+        }
+        if revisar_s is not None:
+            est["revisar"] = (
+                list(revisar_s[i - 1]) if isinstance(revisar_s[0], list)
+                else list(revisar_s)
+            )
+        estudiantes.append(est)
+    return {"encabezado": encabezado, "estudiantes": estudiantes}
+
+
+class TestFormatoPosicional(unittest.TestCase):
+
+    def test_celdas_vacias_omitidas_no_corren_posiciones(self):
+        # Planilla de 4 columnas: "45 40 [vacía] 50". El modelo omite la vacía
+        # (col 3) y las posiciones se reconstruyen exactas: el 50 queda en la
+        # columna 4, NUNCA corrido a la columna de la vacía.
+        areas = [[
+            {"col": 1, "valor": 45},
+            {"col": 2, "valor": 40},
+            {"col": 4, "valor": 50},
+        ]] + [[
+            {"col": 1, "valor": 40},
+            {"col": 2, "valor": 50},
+            {"col": 3, "valor": 60},
+            {"col": 4, "valor": 70},
+        ]] * 11
+        p = gem._normalizar_planilla(
+            _planilla_posicional(areas, n_area_trabajo=4)
+        )
+        est = p["estudiantes"][0]
+        self.assertEqual(est["area_trabajo"], [45, 40, None, 50])
+        self.assertFalse(p["revisar_planilla"])
+        # Sin marca extra de fila: la omisión de una celda vacía es el
+        # comportamiento NORMAL del formato posicional, no un colapso.
+        self.assertEqual(est["revisar"], [False, False, False, False])
+
+    def test_primera_celda_vacia_omitida(self):
+        # "[vacía] 50 50 50 50": col 1 omitida, posiciones exactas.
+        areas = [[
+            {"col": 2, "valor": 50},
+            {"col": 3, "valor": 50},
+            {"col": 4, "valor": 50},
+            {"col": 5, "valor": 50},
+        ]] + [[
+            {"col": 1, "valor": 45},
+            {"col": 2, "valor": 50},
+            {"col": 3, "valor": 50},
+            {"col": 4, "valor": 50},
+            {"col": 5, "valor": 50},
+        ]] * 11
+        p = gem._normalizar_planilla(
+            _planilla_posicional(areas, n_area_trabajo=5)
+        )
+        est = p["estudiantes"][0]
+        self.assertEqual(est["area_trabajo"], [None, 50, 50, 50, 50])
+        self.assertFalse(p["revisar_planilla"])
+
+    def test_varias_vacias_internas_omitidas(self):
+        areas = [[
+            {"col": 1, "valor": 2},
+            {"col": 2, "valor": 46},
+            {"col": 4, "valor": 50},
+            {"col": 5, "valor": 40},
+        ]] + [[
+            {"col": 1, "valor": 45},
+            {"col": 2, "valor": 50},
+            {"col": 3, "valor": 50},
+            {"col": 4, "valor": 50},
+            {"col": 5, "valor": 50},
+        ]] * 11
+        p = gem._normalizar_planilla(
+            _planilla_posicional(areas, n_area_trabajo=5)
+        )
+        est = p["estudiantes"][0]
+        self.assertEqual(est["area_trabajo"], [2, 46, None, 50, 40])
+        self.assertFalse(p["revisar_planilla"])
+
+    def test_null_explicito_con_col_conserva_posicion(self):
+        # El modelo incluye la celda con null explícito: la posición se
+        # conserva igual que si la omitiera.
+        areas = [[
+            {"col": 1, "valor": 48},
+            {"col": 2, "valor": 45},
+            {"col": 3, "valor": None},
+            {"col": 4, "valor": 44},
+        ]] * 12
+        p = gem._normalizar_planilla(
+            _planilla_posicional(areas, n_area_trabajo=4)
+        )
+        est = p["estudiantes"][0]
+        self.assertEqual(est["area_trabajo"], [48, 45, None, 44])
+        self.assertFalse(p["revisar_planilla"])
+
+    def test_celda_ilegible_valor_null_y_revisar_true(self):
+        # Celda ilegible ("+"): null con su col y revisar en esa posición.
+        areas = [[
+            {"col": 1, "valor": 45},
+            {"col": 2, "valor": None, "revisar": True},
+            {"col": 3, "valor": 50},
+            {"col": 4, "valor": 60},
+        ]] * 12
+        p = gem._normalizar_planilla(
+            _planilla_posicional(areas, n_area_trabajo=4)
+        )
+        est = p["estudiantes"][0]
+        self.assertEqual(est["area_trabajo"], [45, None, 50, 60])
+        self.assertTrue(est["revisar"][1])
+        self.assertFalse(p["revisar_planilla"])
+
+    def test_col_fuera_de_rango_marca_planilla_y_toda_la_fila(self):
+        # El modelo devuelve una col 5 con n_area_trabajo=4 declarado: sobran
+        # valores -> revisar_planilla y la fila completa en revisión (igual que
+        # el colapso plano: el corrimiento es sospechoso).
+        areas = [[
+            {"col": 1, "valor": 45},
+            {"col": 2, "valor": 40},
+            {"col": 4, "valor": 50},
+            {"col": 5, "valor": 60},
+        ]] + [[
+            {"col": 1, "valor": 40},
+            {"col": 2, "valor": 50},
+            {"col": 3, "valor": 60},
+            {"col": 4, "valor": 70},
+        ]] * 11
+        p = gem._normalizar_planilla(
+            _planilla_posicional(areas, n_area_trabajo=4)
+        )
+        est = p["estudiantes"][0]
+        # Los valores que caen dentro del declarado se conservan; el de la col
+        # fuera de rango no tiene posición válida.
+        self.assertTrue(p["revisar_planilla"])
+        self.assertTrue(all(est["revisar"]))
+        self.assertEqual(len(est["area_trabajo"]), 4)
+
+    def test_col_duplicada_marca_toda_la_fila(self):
+        areas = [[
+            {"col": 2, "valor": 45},
+            {"col": 2, "valor": 40},
+            {"col": 4, "valor": 50},
+        ]] + [[
+            {"col": 1, "valor": 40},
+            {"col": 2, "valor": 50},
+            {"col": 3, "valor": 60},
+            {"col": 4, "valor": 70},
+        ]] * 11
+        p = gem._normalizar_planilla(
+            _planilla_posicional(areas, n_area_trabajo=4)
+        )
+        est = p["estudiantes"][0]
+        self.assertTrue(all(est["revisar"]))
+        self.assertTrue(p["revisar_planilla"])
+
+    def test_sin_declarado_usar_max_col(self):
+        # Sin n_area_trabajo: el ancho se infiere del col más alto observado.
+        areas = [[
+            {"col": 1, "valor": 2},
+            {"col": 2, "valor": 46},
+            {"col": 4, "valor": 50},
+        ]] * 12
+        p = gem._normalizar_planilla(
+            _planilla_posicional(areas, n_area_trabajo=None)
+        )
+        est = p["estudiantes"][0]
+        self.assertEqual(est["area_trabajo"], [2, 46, None, 50])
+
+    def test_revisar_legacy_plano_se_alinea_por_posicion(self):
+        # Compatibilidad: formato posicional pero "revisar" viene como lista
+        # plana legacy (longitud observada de area_trabajo, sin dict). El flag
+        # de la posición 2 marca la col 2 aunque el área venga posicional.
+        areas = [[
+            {"col": 1, "valor": 45},
+            {"col": 2, "valor": None},
+            {"col": 3, "valor": 50},
+            {"col": 4, "valor": 60},
+        ]] * 12
+        revs = [False, True, False, False]
+        p = gem._normalizar_planilla(
+            _planilla_posicional(areas, n_area_trabajo=4, revisar_s=revs)
+        )
+        est = p["estudiantes"][0]
+        self.assertEqual(est["area_trabajo"], [45, None, 50, 60])
+        self.assertTrue(est["revisar"][1])
+        self.assertFalse(p["revisar_planilla"])
+
+    def test_prompt_pide_formato_posicional(self):
+        texto = gem._PROMPT_PLANILLA
+        # El contrato v3: cada celda con su columna explícita.
+        self.assertIn('"col"', texto)
+        self.assertIn('"valor"', texto)
+        # La posición NUNCA se infiere por el orden de una lista compactada.
+        self.assertIn("compact", texto.lower())
+
+    def test_formato_mixto_por_estudiante(self):
+        # Cada estudiante resuelve independientemente: posicional y plano
+        # pueden convivir en la misma planilla (el modelo no siempre cambia de
+        # formato a la vez).
+        areas = [
+            [{"col": 1, "valor": 45}, {"col": 3, "valor": 50}],
+            [45, 40, 50, 60],
+        ] * 6
+        p = gem._normalizar_planilla(
+            _planilla_posicional(areas, n_area_trabajo=4)
+        )
+        self.assertEqual(p["estudiantes"][0]["area_trabajo"],
+                         [45, None, 50, None])
+        self.assertEqual(p["estudiantes"][1]["area_trabajo"],
+                         [45, 40, 50, 60])
+        self.assertFalse(p["revisar_planilla"])
+
+
+# ---------------------------------------------------------------------- #
 # Guardas de regresión del prompt (regla anti-colapso + celdas ilegibles)
 # ---------------------------------------------------------------------- #
 
@@ -183,11 +430,12 @@ class TestPromptAntiColapso(unittest.TestCase):
 
     def test_prompt_tiene_regla_anticolapso_con_ejemplo(self):
         texto = gem._PROMPT_PLANILLA
-        self.assertIn("REGLA ANTI-COMPACTACIÓN", texto)
-        # El ejemplo concreto: [45, 40, null, 50] y los dos colapsos prohibidos.
-        self.assertIn("[45, 40, null, 50]", texto)
-        self.assertIn("[45, 40, 50]", texto)
-        self.assertIn("n_area_trabajo para TODOS los alumnos", texto)
+        # La regla anti-colapso (ahora en formato posicional) está presente.
+        self.assertIn("NUNCA compactes", texto)
+        # El ejemplo concreto con la celda vacía en el medio y las cols reales.
+        self.assertIn('{"col": 1, "valor": 45}', texto)
+        self.assertIn('{"col": 4, "valor": 50}', texto)
+        self.assertIn('el siguiente objeto lleva "col": 4', texto)
         # Celdas ilegibles: null en su posición + revisar, nunca inventar.
         self.assertIn("celda es ilegible", texto)
         self.assertIn("nunca inventes un número", texto)

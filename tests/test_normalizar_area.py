@@ -295,8 +295,9 @@ class TestNAreaTrabajoEncabezado(unittest.TestCase):
         # Guarda de regresión: el prompt debe pedir el campo y la regla de
         # contar columnas del ENCABEZADO aunque las celdas estén vacías.
         self.assertIn("n_area_trabajo", gem._PROMPT_PLANILLA)
-        self.assertIn("EXACTAMENTE n_area_trabajo", gem._PROMPT_PLANILLA)
         self.assertIn("columnas del encabezado", gem._PROMPT_PLANILLA)
+        self.assertIn("cantidad real de columnas del encabezado",
+                      gem._PROMPT_PLANILLA)
 
     def test_prompt_incluye_refuerzos_nuevos(self):
         # Guardas de regresión (S16): membrete, rótulos cortados, apuntes
