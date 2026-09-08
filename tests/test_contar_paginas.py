@@ -1,10 +1,10 @@
 """
-Tests de contar_paginas y del límite de planillas por PDF (S16).
+Tests de contar_paginas y del límite de planillas por lote (S16).
 
 PDFs reales creados con PyMuPDF en un directorio temporal: se verifica que
 contar_paginas devuelva el conteo correcto sin rasterizar, que el límite de
-MAX_PLANILLAS_POR_PDF (10) se aplique al conteo, y que una ruta inexistente
-lance PdfError con mensaje amigable.
+MAX_PLANILLAS_POR_PDF (alias de MAX_PLANILLAS_POR_LOTE, 30) se aplique al
+conteo, y que una ruta inexistente lance PdfError con mensaje amigable.
 
 Uso (desde la raíz del proyecto):
     python -m unittest discover -s tests -v
@@ -52,14 +52,16 @@ class TestContarPaginas(unittest.TestCase):
         ruta = self._ruta_pdf(3)
         self.assertEqual(pdf_loader.contar_paginas(ruta), 3)
 
-    def test_diez_paginas_no_supera_el_limite(self):
-        ruta = self._ruta_pdf(10)
+    def test_limite_exacto_no_supera_el_limite(self):
+        # Exactamente el máximo permitido -> no supera el límite (S16).
+        paginas = pdf_loader.MAX_PLANILLAS_POR_PDF
+        ruta = self._ruta_pdf(paginas)
         n = pdf_loader.contar_paginas(ruta)
         self.assertEqual(n, pdf_loader.MAX_PLANILLAS_POR_PDF)
         self.assertFalse(n > pdf_loader.MAX_PLANILLAS_POR_PDF)
 
-    def test_once_paginas_supera_el_limite(self):
-        ruta = self._ruta_pdf(11)
+    def test_una_mas_supera_el_limite(self):
+        ruta = self._ruta_pdf(pdf_loader.MAX_PLANILLAS_POR_PDF + 1)
         n = pdf_loader.contar_paginas(ruta)
         self.assertTrue(n > pdf_loader.MAX_PLANILLAS_POR_PDF)
 

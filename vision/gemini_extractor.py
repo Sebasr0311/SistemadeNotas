@@ -501,6 +501,7 @@ def extraer_planilla_pdf(
     modelo: str = None,
     progreso_cb=None,
     por_pagina_cb=None,
+    origen=None,
 ):
     """
     Procesa todas las páginas del PDF y devuelve (planillas, fallidas).
@@ -512,12 +513,19 @@ def extraer_planilla_pdf(
     sea un fallo propio de lectura de una planilla.
 
     Args:
-        paginas: lista de dicts de `pdf_loader.cargar_paginas`.
+        paginas: lista de dicts de `pdf_loader.cargar_paginas` o de
+                 `pdf_loader.cargar_imagen` (cada uno con `indice` 1-based).
         api_key: clave de Google AI.
         modelo: modelo de visión (opcional).
         progreso_cb: callback de estado (mensaje).
         por_pagina_cb: callback opcional que recibe (indice, planilla) tras cada
                        página exitosa (útil para cancelar/saltar).
+        origen: dict opcional con el origen del archivo (ej. {"tipo": "pdf"|"imagen",
+                "ruta": "..."}). Cuando NO es None, a cada planilla normalizada se le
+                adjunta `planilla["fuente"] = {**origen, "indice": pag["indice"]}` para
+                poder volver a renderizar su imagen más tarde (ej. la pantalla de
+                configuración por forma). Cuando es None, NO se agrega la clave
+                (compatibilidad total).
 
     Returns:
         (planillas, fallidas):
@@ -556,6 +564,10 @@ def extraer_planilla_pdf(
             cerrar = getattr(imagen, "close", None)
             if callable(cerrar):
                 cerrar()
+        # Mantener el 1:1 página->planilla: cada planilla exitosa hereda el
+        # indice de su página.
+        if origen is not None:
+            planilla["fuente"] = {**origen, "indice": pag["indice"]}
         planillas.append(planilla)
         if por_pagina_cb:
             por_pagina_cb(i, planilla)

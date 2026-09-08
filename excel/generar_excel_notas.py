@@ -335,7 +335,32 @@ def _escribir_hoja(ws, planilla: dict, column_config=None):
         ws.column_dimensions[get_column_letter(j)].width = 14
 
 
-def generar_excel_planilla(planilla: dict, ruta_salida: str, column_config=None):
+def _clave_forma(planilla: dict):
+    """Clave de forma de una planilla: tupla ("n_areas", n) con su cantidad de
+    columnas de notas calculada POR PLANILLA (misma clave que agrupar_por_forma
+    y que usa la GUI para guardar las configs por forma)."""
+    enc = planilla.get("encabezado") or {}
+    estudiantes = planilla.get("estudiantes") or []
+    return ("n_areas", calcular_n_areas(enc, estudiantes))
+
+
+def _resolver_column_config(planilla: dict, column_config, column_configs):
+    """
+    Resuelve la ColumnConfig para una planilla según la precedencia:
+
+    - Si `column_configs` no es None -> se busca por clave de forma
+      `_clave_forma(planilla)`; si no hay clave para esa planilla -> None
+      (legacy para ese grupo).
+    - Si `column_configs` es None y `column_config` no -> la única config.
+    - Ambos None -> None (legacy histórico).
+    """
+    if column_configs is not None:
+        return column_configs.get(_clave_forma(planilla))
+    return column_config
+
+
+def generar_excel_planilla(planilla: dict, ruta_salida: str, column_config=None,
+                           column_configs=None):
     """
     Genera un Excel de una sola planilla (un curso).
 
@@ -343,19 +368,24 @@ def generar_excel_planilla(planilla: dict, ruta_salida: str, column_config=None)
         planilla: dict con encabezado + estudiantes.
         ruta_salida: ruta del archivo .xlsx de salida.
         column_config: ColumnConfig (None = promedio simple de todas las columnas).
+        column_configs: dict {clave_forma: ColumnConfig} opcional. Si se pasa,
+                        se resuelve la config de esta planilla por su forma
+                        (precedencia sobre column_config).
     """
+    config = _resolver_column_config(planilla, column_config, column_configs)
     wb = openpyxl.Workbook()
     ws = wb.active
     enc = planilla["encabezado"]
     ws.title = f"P{enc['periodo']} - {enc['grupo']}"
-    _escribir_hoja(ws, planilla, column_config)
+    _escribir_hoja(ws, planilla, config)
     wb.save(ruta_salida)
     return ruta_salida
 
 
-def generar_excel_asignatura(planillas: list, ruta_salida: str, column_config=None):
+def generar_excel_asignatura(planillas: list, ruta_salida: str, column_config=None,
+                             column_configs=None):
     """
-    Caso real de uso: un PDF sube TODAS las planillas de una misma asignatura
+    Caso real de uso: un lote sube TODAS las planillas de una misma asignatura
     (varios cursos/grupos). Se agrupan automáticamente por curso y se genera
     UN SOLO Excel con una hoja por cada curso.
 
@@ -364,6 +394,11 @@ def generar_excel_asignatura(planillas: list, ruta_salida: str, column_config=No
         ruta_salida: ruta del archivo .xlsx de salida.
         column_config: ColumnConfig (None = promedio simple de todas las columnas).
                        Se aplica la MISMA config a todas las hojas.
+        column_configs: dict {clave_forma: ColumnConfig} opcional. Si se pasa,
+                        cada hoja resuelve su config POR FORMA (la cantidad de
+                        columnas de notas de ese grupo), con precedencia sobre
+                        `column_config`. Si una forma no tiene clave -> None
+                        (legacy para ese grupo).
     """
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # se reemplaza por una hoja por curso
@@ -381,6 +416,9 @@ def generar_excel_asignatura(planillas: list, ruta_salida: str, column_config=No
         base["estudiantes"] = combinar_estudiantes(paginas)
         planilla_final = base
 
+        # Resolver la config de ESTA forma para este grupo (None si no aplica).
+        config_hoja = _resolver_column_config(planilla_final, column_config, column_configs)
+
         asignatura_corta = asignatura[:22].strip()
         nombre_hoja = f"Curso {grupo} - {asignatura_corta}"[:31]
         original = nombre_hoja
@@ -391,7 +429,7 @@ def generar_excel_asignatura(planillas: list, ruta_salida: str, column_config=No
         nombres_usados.add(nombre_hoja)
 
         ws = wb.create_sheet(title=nombre_hoja)
-        _escribir_hoja(ws, planilla_final, column_config)
+        _escribir_hoja(ws, planilla_final, config_hoja)
 
     wb.save(ruta_salida)
     return ruta_salida

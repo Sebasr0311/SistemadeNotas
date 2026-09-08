@@ -10,6 +10,39 @@ Módulo puro: sin tkinter, sin red, sin efectos secundarios.
 """
 
 
+def agrupar_por_forma(planillas):
+    """
+    Agrupa las planillas POR FORMA (cantidad de columnas de notas).
+
+    Un PDF con varias planillas puede tener planillas con distinta cantidad de
+    columnas de área de trabajo (ej. un curso con 4 columnas y otro con 6). La
+    configuración de columnas se elige UNA VEZ por "forma", y se aplica a todas
+    las planillas iguales.
+
+    Clave = tupla `("n_areas", n)` donde `n` = `calcular_n_areas(...)` calculado
+    POR PLANILLA (no por curso). Orden estable por primera aparición.
+
+    Devuelve (por_forma: dict[tuple, list], orden_formas: list[tuple]).
+    """
+    # Import local para evitar ciclos: este módulo (excel.agrupacion) puede ser
+    # importado por excel.generar_excel_notas, que a su vez importa acá; el
+    # cálculo de n_areas vive en generar_excel_notas.
+    from excel.generar_excel_notas import calcular_n_areas
+
+    por_forma = {}
+    orden_formas = []
+    for p in planillas:
+        enc = p.get("encabezado") or {}
+        estudiantes = p.get("estudiantes") or []
+        n = calcular_n_areas(enc, estudiantes)
+        clave = ("n_areas", n)
+        if clave not in por_forma:
+            por_forma[clave] = []
+            orden_formas.append(clave)
+        por_forma[clave].append(p)
+    return por_forma, orden_formas
+
+
 def _asignatura_limpia(nombre) -> str:
     """Normaliza el nombre de una asignatura para usarla como clave de agrupación.
 

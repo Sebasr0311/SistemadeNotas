@@ -277,5 +277,84 @@ class TestExcelEndToEndConConfig(unittest.TestCase):
                          '=IFERROR(SUM(E11:F11)/2,"")')
 
 
+class TestExcelPorFormaConColumnConfigs(unittest.TestCase):
+    """La config se resuelve POR FORMA cuando se pasa `column_configs`:
+    cada hoja usa la config de su propia cantidad de columnas (spec v3)."""
+
+    def _planillas(self):
+        # Forma n=2 (grupo 0201) y forma n=4 (grupo 0401), mismo periodo 3.
+        p2 = _planilla([[40, 50], [41, 51]], n_area_trabajo=2)
+        p2["encabezado"]["grupo"] = "0201"
+        p4 = _planilla([[40, 50, 60, 70], [41, 51, 61, 71]], n_area_trabajo=4)
+        p4["encabezado"]["grupo"] = "0401"
+        return [p2, p4]
+
+    def _configs(self):
+        cfg2 = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "Área Trabajo 1", "incluida": True, "peso": 60},
+            {"nombre": "Área Trabajo 2", "incluida": True, "peso": 40},
+        ])
+        cfg4 = ColumnConfig(modo="simple", columnas=[
+            {"nombre": "Área Trabajo 1", "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 2", "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 3", "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 4", "incluida": True, "peso": 25},
+        ])
+        return {("n_areas", 2): cfg2, ("n_areas", 4): cfg4}
+
+    def test_cada_hoja_usa_la_config_de_su_forma(self):
+        directorio = tempfile.mkdtemp(prefix="notas_por_forma_")
+        ruta = os.path.join(directorio, "salida.xlsx")
+        generador.generar_excel_asignatura(
+            self._planillas(), ruta, column_configs=self._configs()
+        )
+
+        wb = openpyxl.load_workbook(ruta)
+        ws2 = wb["Curso 0201 - MATEMATICAS"]
+        ws4 = wb["Curso 0401 - MATEMATICAS"]
+
+        # Forma n=2 (pesos 60/40): área E,F; definitiva en G(7).
+        hr2 = _fila_header(ws2)
+        fila1 = hr2 + 1
+        self.assertEqual(ws2.cell(row=fila1, column=7).value,
+                         '=IFERROR((E{f}*60+F{f}*40)/100,"")'.format(f=fila1))
+        # La info de la hoja refleja el modo y los pesos.
+        valores2 = [ws2.cell(row=r, column=1).value for r in range(1, hr2)]
+        self.assertIn("Modo de cálculo", valores2)
+        self.assertIn("Pesos", valores2)
+        self.assertIn("Pesos", [ws2.cell(row=r, column=2).value for r in range(1, hr2)])
+
+        # Forma n=4 (simple con todas): área E..H; definitiva en I(9).
+        hr4 = _fila_header(ws4)
+        fila1 = hr4 + 1
+        self.assertEqual(ws4.cell(row=fila1, column=9).value,
+                         '=IFERROR(AVERAGE(E{f},F{f},G{f},H{f}),"")'.format(f=fila1))
+        valores4 = [ws4.cell(row=r, column=1).value for r in range(1, hr4)]
+        self.assertIn("Modo de cálculo", valores4)
+        self.assertNotIn("Pesos", valores4)
+        self.assertIn("Promedio simple", [ws4.cell(row=r, column=2).value for r in range(1, hr4)])
+
+    def test_sin_clave_para_una_forma_cae_a_legacy(self):
+        # column_configs solo tiene la forma n=2: la hoja n=4 queda legacy
+        # (fórmula SUM/n, sin filas de info de cálculo).
+        directorio = tempfile.mkdtemp(prefix="notas_por_forma_")
+        ruta = os.path.join(directorio, "salida.xlsx")
+        configs = dict(self._configs())
+        del configs[("n_areas", 4)]
+        generador.generar_excel_asignatura(
+            self._planillas(), ruta, column_configs=configs
+        )
+
+        wb = openpyxl.load_workbook(ruta)
+        ws4 = wb["Curso 0401 - MATEMATICAS"]
+        hr4 = _fila_header(ws4)
+        fila1 = hr4 + 1
+        # Legacy: col_def = 5 + 4 = 9, fórmula SUM(E..H)/4.
+        self.assertEqual(ws4.cell(row=fila1, column=9).value,
+                         f'=IFERROR(SUM(E{fila1}:H{fila1})/4,"")')
+        valores4 = [ws4.cell(row=r, column=1).value for r in range(1, hr4)]
+        self.assertNotIn("Modo de cálculo", valores4)
+
+
 if __name__ == "__main__":
     unittest.main()

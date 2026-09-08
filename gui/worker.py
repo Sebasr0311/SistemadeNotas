@@ -6,6 +6,7 @@ Gemini) puede tardar. Se corre en un hilo aparte y se notifica el avance a la
 interfaz mediante una cola de mensajes que la GUI revisa periódicamente.
 """
 
+import os
 import queue
 import threading
 
@@ -25,14 +26,20 @@ class ProcesadorEnSegundoPlano:
     """
     Ejecuta la extracción en un hilo de fondo y envía mensajes a una cola.
 
+    Acepta UNO o VARIOS archivos (PDF y/o imágenes). El lote procesa cada
+    archivo por separado y acumula todas las planillas extraídas.
+
     Uso:
-        proc = ProcesadorEnSegundoPlano(ruta_pdf, cola)
+        proc = ProcesadorEnSegundoPlano([ruta_pdf, ruta_img], cola)
         proc.iniciar()
         # La GUI consume cola.get() hasta ver MSG_RESULTADO o MSG_ERROR.
     """
 
-    def __init__(self, ruta_pdf: str, cola: queue.Queue):
-        self.ruta_pdf = ruta_pdf
+    def __init__(self, rutas, cola: queue.Queue):
+        # Acepta una lista de rutas o un str suelto (compatibilidad).
+        if isinstance(rutas, str):
+            rutas = [rutas]
+        self.rutas = list(rutas or [])
         self.cola = cola
         self._hilo = None
         self.cancelado = False
@@ -50,11 +57,6 @@ class ProcesadorEnSegundoPlano:
             api_key = app_config.get_api_key()
             modelo = app_config.get_modelo_vision()
 
-            # 1) Validar y convertir el PDF a páginas.
-            self.cola.put({"tipo": MSG_PROGRESO, "mensaje": "Abriendo el PDF...", "valor": 0.02})
-            paginas = pdf_loader.cargar_paginas(self.ruta_pdf, dpi=dpi)
-            total = len(paginas)
-
             # 2) Leer cada planilla con Gemini.
             def _progreso(mensaje, valor=None):
                 if self.cancelado:
@@ -68,30 +70,57 @@ class ProcesadorEnSegundoPlano:
                     msg["valor"] = valor
                 self.cola.put(msg)
 
-            try:
-                planillas, fallidas = gemini_extractor.extraer_planilla_pdf(
-                    paginas,
-                    api_key=api_key,
-                    modelo=modelo,
-                    progreso_cb=_progreso,
-                )
+            planillas = []
+            fallidas = []
+            paginas_total = 0
+            n_archivos = len(self.rutas)
 
+            # 1) Iterar cada archivo (PDF o imagen) y acumular las planillas.
+            for idx, ruta in enumerate(self.rutas):
                 if self.cancelado:
                     raise _Cancelado()
 
-                self.cola.put(
-                    {
-                        "tipo": MSG_RESULTADO,
-                        "planillas": planillas,
-                        "paginas_total": total,
-                        "fallidas": fallidas,
-                    }
-                )
-            finally:
-                # S7: el PDF quedó abierto para el render lazy de las páginas;
-                # se cierra SIEMPRE, aun si hubo error o cancelación, para no
-                # quedar con el archivo tomado.
-                pdf_loader.cerrar_paginas(paginas)
+                # Progreso acumulado: 0.02..0.95 repartido por archivo, con un
+                # mensaje que nombra el archivo que se está abriendo.
+                inicio = 0.02 + (idx / n_archivos) * 0.93 if n_archivos else 0.02
+                nombre = os.path.basename(ruta)
+                if pdf_loader.es_imagen(ruta):
+                    mensaje_abrir = f"Abriendo la imagen {nombre}..."
+                else:
+                    mensaje_abrir = f"Abriendo el PDF {nombre}..."
+                self.cola.put({"tipo": MSG_PROGRESO, "mensaje": mensaje_abrir, "valor": inicio})
+
+                paginas = pdf_loader.cargar_archivo(ruta, dpi=dpi)
+                paginas_total += len(paginas)
+                tipo = "imagen" if pdf_loader.es_imagen(ruta) else "pdf"
+                try:
+                    extraidas, fallidas_por_archivo = gemini_extractor.extraer_planilla_pdf(
+                        paginas,
+                        api_key=api_key,
+                        modelo=modelo,
+                        progreso_cb=_progreso,
+                        origen={"tipo": tipo, "ruta": ruta},
+                    )
+
+                    if self.cancelado:
+                        raise _Cancelado()
+
+                    planillas.extend(extraidas)
+                    fallidas.extend(fallidas_por_archivo)
+                finally:
+                    # S7: el archivo quedó abierto para el render lazy de las
+                    # páginas; se cierra SIEMPRE, aun si hubo error o cancelación,
+                    # para no quedar con el archivo tomado.
+                    pdf_loader.cerrar_paginas(paginas)
+
+            self.cola.put(
+                {
+                    "tipo": MSG_RESULTADO,
+                    "planillas": planillas,
+                    "paginas_total": paginas_total,
+                    "fallidas": fallidas,
+                }
+            )
         except _Cancelado:
             # La cancelación NO es un error: se informa como un estado propio
             # (W4) para que la GUI lo muestre de forma amigable.
