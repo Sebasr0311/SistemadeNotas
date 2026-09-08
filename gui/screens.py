@@ -656,16 +656,16 @@ class App(ctk.CTk):
     def mostrar_configuracion_calculo(self):
         """
         Pantalla donde la usuaria define CÓMO se calcula la nota definitiva:
-        qué columnas de Área de Trabajo entran al promedio y si es un promedio
-        simple o con pesos (porcentajes) distintos por columna.
+        qué columnas entran al promedio y si es un promedio simple o con pesos.
 
-        La configuración es POR FORMA (cantidad de columnas de notas): cada
-        planilla se agrupa por su cantidad de columnas, y la usuaria elige UNA
-        vez la config para todas las planillas de esa forma. Junto al formulario
-        se muestra la imagen (escalada) de la primera planilla de la forma,
-        clickeable para ver la planilla completa.
+        La configuración es POR PLANILLA: cada planilla tiene su propia config
+        independiente (aunque otra planilla tenga la misma cantidad de columnas).
+        Un combobox arriba elige la planilla a configurar; debajo hay UNA sola
+        tarjeta con el formulario (modo, checkboxes de columnas, pesos) y la
+        imagen de esa planilla (clickeable para verla completa).
 
-        El formulario de cada forma se reconstruye dinámicamente según el modo:
+        El formulario de la planilla seleccionada se reconstruye dinámicamente
+        según el modo:
         - simple:  checkboxes para marcar qué columnas entran.
         - pesos:   checkboxes + campo de porcentaje por columna.
         """
@@ -680,13 +680,13 @@ class App(ctk.CTk):
             self.mostrar_principal()
             return
 
-        # Agrupar las planillas POR FORMA (cantidad de columnas de notas).
-        por_forma, orden_formas = agrupar_por_forma(self.planillas)
-        if not orden_formas:
-            self.mostrar_principal()
-            return
+        # Taggear cada planilla con su índice para resolver su config por
+        # planilla (no por forma) al generar el Excel.
+        for i, p in enumerate(self.planillas):
+            p["_idx"] = i
 
         dpi = app_config.load_config().get("preferencias", {}).get("dpi_pdf") or 250
+        self._dpi_imagen = dpi
 
         pantalla = ctk.CTkFrame(self._contenedor, fg_color=styles.COLOR_FONDO)
 
@@ -697,139 +697,73 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             pantalla,
-            text="Elegí qué notas entran a la definitiva del periodo. Cada tipo de "
-            "planilla (según la cantidad de columnas) se configura por separado.\n"
+            text="Elegí qué notas entran a la definitiva del periodo. Cada planilla "
+            "se configura por separado; seleccioná la planilla en el desplegable.\n"
             "Hacé clic en la imagen para ver la planilla completa.",
             font=(styles.FUENTE, styles.TAM_TEXTO_CHICO), text_color=styles.COLOR_TEXTO_SECUNDARIO,
             justify="center", wraplength=720,
         ).pack(pady=(0, 10))
 
-        # ── Contenedor scrolleable con un frame interior que empaqueta cada
-        #    forma. Si hay muchas formas (planillas de distinta cantidad de
-        #    columnas), la pantalla scrollea en vez de desbordar.
-        self._frame_formas = ctk.CTkScrollableFrame(
+        # ── Combobox con todas las planillas (fijo arriba) ──
+        nombres = [self._nombre_planilla(i, p) for i, p in enumerate(self.planillas)]
+        self._idx_actual = 0
+        var_combo = tk.StringVar(value=nombres[0])
+        ctk.CTkLabel(
+            pantalla, text="Planilla:",
+            font=(styles.FUENTE, styles.TAM_TEXTO, "bold"), text_color=styles.COLOR_TEXTO,
+        ).pack(anchor="w", padx=24, pady=(4, 2))
+        combo = ctk.CTkComboBox(
+            pantalla, values=nombres, variable=var_combo, width=700, height=36,
+            font=(styles.FUENTE, styles.TAM_TEXTO), text_color=styles.COLOR_TEXTO,
+            dropdown_font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
+            fg_color=styles.COLOR_BLANCO, border_color="#C6D2E8",
+            command=self._on_planilla_seleccionada,
+        )
+        combo.pack(anchor="w", padx=24, pady=(0, 8))
+        self._combo_var = var_combo
+        self._combo_planilla = combo
+
+        # ── Estado de widgets por PLANILLA (índice int) ──
+        self._var_modo = {}        # idx -> StringVar
+        self._chk_col = {}         # idx -> {índice: BooleanVar}
+        self._chk_col_frames = {}  # idx -> frame del formulario de columnas
+        self._peso_col = {}        # idx -> {índice: StringVar}
+        self._peso_entry = {}      # idx -> {índice: CTkEntry de peso}
+        self._label_pesos = {}     # idx -> CTkLabel de resumen de pesos
+
+        # Asegurar una config por defecto para cada planilla. La cantidad de
+        # columnas "Def. Periodo" = periodo de la planilla menos 1 (campo
+        # ev_anteriores). Límite sanitizador: si ev+áreas+otras superan 16
+        # columnas candidatas, se recortan las últimas (las "otras") para no
+        # romper la tabla de la UI.
+        MAX_COLUMNAS_CANDIDATAS = 16
+        for i, p in enumerate(self.planillas):
+            if i in self._column_configs:
+                continue
+            enc = p.get("encabezado") or {}
+            n_areas = generar_excel_notas.calcular_n_areas(enc, p.get("estudiantes") or [])
+            periodo_raw = enc.get("periodo")
+            periodo_p = 0
+            if (isinstance(periodo_raw, int) and not isinstance(periodo_raw, bool)
+                    and 1 <= periodo_raw <= 4):
+                periodo_p = periodo_raw
+            n_ev = periodo_p - 1 if periodo_p > 0 else 0
+            # Columnas "otras" declaradas por el extractor (trabajo práctico,
+            # parcial, recuperatorio, etc.): la usuaria decide después cuáles
+            # entran a la definitiva.
+            nombres_otras = enc.get("otras_columnas") or []
+            config_defecto = ColumnConfig.crear_desde_planilla(n_areas, n_ev, nombres_otras)
+            if len(config_defecto.columnas) > MAX_COLUMNAS_CANDIDATAS:
+                config_defecto.columnas = config_defecto.columnas[:MAX_COLUMNAS_CANDIDATAS]
+            self._column_configs[i] = config_defecto
+
+        # ── Tarjeta de config (una sola planilla a la vez, con scroll) ──
+        self._frame_config = ctk.CTkScrollableFrame(
             pantalla, fg_color="transparent", width=880, height=400,
         )
-        self._frame_formas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        interior = ctk.CTkFrame(self._frame_formas, fg_color="transparent")
-        interior.pack(fill="both", expand=True, padx=4, pady=4)
-        self._interior_formas = interior
+        self._frame_config.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
-        # Resetear el estado de widgets por forma.
-        self._var_modo = {}        # forma -> StringVar
-        self._chk_col = {}         # forma -> {índice: BooleanVar}
-        self._chk_col_frames = {}  # forma -> frame del formulario
-        self._peso_col = {}        # forma -> {índice: StringVar}
-        self._peso_entry = {}      # forma -> {índice: CTkEntry de peso}
-        self._label_pesos = {}     # forma -> CTkLabel de resumen de pesos
-        self._planillas_forma = {} # forma -> planillas de esa forma (muestra)
-        # Navegador de imágenes: índice de la planilla mostrada por forma y
-        # columna derecha donde se redibuja (si la forma tiene varias planillas).
-        self._idx_imagen_forma = {}  # forma -> int
-        self._col_der_imagen = {}    # forma -> CTkFrame
-        self._orden_formas = orden_formas
-        self._dpi_imagen = dpi
-
-        # Asegurar una config por defecto para cada forma. La cantidad de
-        # columnas "Def. Periodo" = periodo de la primera planilla de la forma
-        # menos 1 (campo ev_anteriores). Límite sanitizador: si ev+áreas+otras
-        # superan 16 columnas candidatas, se recortan las últimas (las "otras")
-        # para no romper la tabla de la UI.
-        MAX_COLUMNAS_CANDIDATAS = 16
-        for clave_forma in orden_formas:
-            n = clave_forma[1]
-            if clave_forma not in self._column_configs:
-                planillas_forma = por_forma[clave_forma]
-                periodo_forma = 0
-                if planillas_forma:
-                    periodo_raw = (planillas_forma[0].get("encabezado") or {}).get("periodo")
-                    if (isinstance(periodo_raw, int) and not isinstance(periodo_raw, bool)
-                            and 1 <= periodo_raw <= 4):
-                        periodo_forma = periodo_raw
-                n_ev = periodo_forma - 1 if periodo_forma > 0 else 0
-                # Columnas "otras" declaradas por el extractor (trabajo
-                # práctico, parcial, recuperatorio, etc.): la usuaria decide
-                # después cuáles entran a la definitiva.
-                enc_forma = planillas_forma[0].get("encabezado") or {}
-                nombres_otras = enc_forma.get("otras_columnas") or []
-                config_defecto = ColumnConfig.crear_desde_planilla(n, n_ev, nombres_otras)
-                if len(config_defecto.columnas) > MAX_COLUMNAS_CANDIDATAS:
-                    config_defecto.columnas = config_defecto.columnas[:MAX_COLUMNAS_CANDIDATAS]
-                self._column_configs[clave_forma] = config_defecto
-
-        # Para cada forma: un CTkFrame con dos columnas (formulario + imagen).
-        for i, clave_forma in enumerate(orden_formas, start=1):
-            n = clave_forma[1]
-            planillas_forma = por_forma[clave_forma]
-            self._planillas_forma[clave_forma] = planillas_forma
-
-            frame_forma = ctk.CTkFrame(
-                interior, fg_color=styles.COLOR_BLANCO, corner_radius=12,
-                border_width=1, border_color="#E3E9F5",
-            )
-            frame_forma.pack(fill="x", pady=8, padx=2)
-
-            ctk.CTkLabel(
-                frame_forma,
-                text=self._forma_titulo(i, n, len(planillas_forma)),
-                font=(styles.FUENTE, styles.TAM_SUBTITULO, "bold"),
-                text_color=styles.COLOR_TEXTO,
-            ).pack(anchor="w", padx=14, pady=(10, 2))
-
-            # Dos columnas: formulario a la izquierda, imagen a la derecha.
-            dos_col = ctk.CTkFrame(frame_forma, fg_color="transparent")
-            dos_col.pack(fill="x", padx=10, pady=(0, 8))
-            dos_col.grid_columnconfigure(0, weight=1)
-
-            col_izq = ctk.CTkFrame(dos_col, fg_color="transparent")
-            col_izq.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-
-            col_der = ctk.CTkFrame(dos_col, fg_color="transparent")
-            col_der.grid(row=0, column=1, sticky="n", padx=(8, 0))
-
-            # ── Modo de cálculo (por forma) ──
-            self._var_modo[clave_forma] = tk.StringVar(
-                value=self._column_configs[clave_forma].modo
-            )
-            fila_modo = ctk.CTkFrame(col_izq, fg_color="transparent")
-            fila_modo.pack(anchor="w", pady=(0, 4))
-            ctk.CTkRadioButton(
-                fila_modo, text="Promedio simple (todas las notas valen lo mismo)",
-                variable=self._var_modo[clave_forma], value="simple",
-                command=lambda f=clave_forma: self._on_modo_changed(f),
-                font=(styles.FUENTE, styles.TAM_TEXTO_CHICO), text_color=styles.COLOR_TEXTO,
-            ).pack(anchor="w", pady=2)
-            ctk.CTkRadioButton(
-                fila_modo, text="Cada nota tiene su porcentaje (pesos)",
-                variable=self._var_modo[clave_forma], value="pesos",
-                command=lambda f=clave_forma: self._on_modo_changed(f),
-                font=(styles.FUENTE, styles.TAM_TEXTO_CHICO), text_color=styles.COLOR_TEXTO,
-            ).pack(anchor="w", pady=2)
-
-            # ── Formulario de columnas (por forma) ──
-            frame_col = ctk.CTkFrame(col_izq, fg_color="transparent")
-            frame_col.pack(fill="both", expand=True, pady=(2, 0))
-            self._chk_col_frames[clave_forma] = frame_col
-
-            # ── Aviso de pesos (por forma) ──
-            label_pesos = ctk.CTkLabel(
-                frame_forma, text="", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
-                text_color=styles.COLOR_TEXTO_SECUNDARIO, wraplength=660,
-            )
-            label_pesos.pack(anchor="w", padx=14, pady=(0, 4))
-            self._label_pesos[clave_forma] = label_pesos
-
-            # ── Imagen de la planilla (primera de la forma), clickeable ──
-            primera = planillas_forma[0]
-            self._render_imagen_forma(col_der, primera, i, dpi)
-            if len(planillas_forma) > 1:
-                # Varias planillas en la misma forma: navegador para recorrerlas
-                # sin salir de la configuración (la imagen es por planilla).
-                self._idx_imagen_forma[clave_forma] = 0
-                self._col_der_imagen[clave_forma] = col_der
-                self._render_navegador_forma(clave_forma, col_der, len(planillas_forma))
-
-            self._reconstruir_formulario_columnas(clave_forma, n)
+        self._reconstruir_tarjeta(self._idx_actual)
 
         # ── Botones ──
         fila_botones = ctk.CTkFrame(pantalla, fg_color="transparent")
@@ -853,10 +787,143 @@ class App(ctk.CTk):
 
         self._cambiar_pantalla(pantalla)
 
-    @staticmethod
-    def _forma_titulo(indice, n, x):
-        """Título de una forma: 'Plantilla tipo i · n columnas de notas · x planillas'."""
-        return f"Plantilla tipo {indice} · {n} columnas de notas · {x} planillas"
+    def _nombre_planilla(self, i, p):
+        """Nombre legible de una planilla para el combobox."""
+        enc = p.get("encabezado") or {}
+        asignatura = enc.get("asignatura") or "SIN ASIGNATURA"
+        grupo = enc.get("grupo") or ""
+        n = generar_excel_notas.calcular_n_areas(enc, p.get("estudiantes") or [])
+        return f"Planilla {i + 1}: {asignatura} - Grupo {grupo} ({n} cols)"
+
+    def _on_planilla_seleccionada(self, seleccion):
+        """Al cambiar la selección del combobox: guarda la config de la planilla
+        actual y carga/construye la tarjeta de la nueva planilla."""
+        idx_actual = self._idx_actual
+        # Guardar la config de la planilla visible (sus widgets siguen vivos).
+        if idx_actual in self._var_modo:
+            self._column_configs[idx_actual] = self._leer_config_desde_ui(idx_actual)
+        # Resolver el índice de la nueva selección por su nombre.
+        nuevo = None
+        for i, p in enumerate(self.planillas):
+            if self._nombre_planilla(i, p) == seleccion:
+                nuevo = i
+                break
+        if nuevo is None:
+            return
+        self._idx_actual = nuevo
+        self._reconstruir_tarjeta(nuevo)
+
+    def _leer_config_desde_ui(self, idx):
+        """Reconstruye la ColumnConfig de la planilla idx desde sus widgets
+        (best-effort: un peso no numérico se conserva tal cual venía)."""
+        config_original = self._column_configs.get(idx) or ColumnConfig()
+        modo = self._var_modo[idx].get()
+        chk = self._chk_col[idx]
+        peso = self._peso_col[idx]
+        columnas = []
+        for i, col_original in enumerate(config_original.columnas):
+            incl = chk[i].get() if i in chk else col_original.get("incluida", True)
+            valor_peso = col_original.get("peso", 0)
+            if i in peso:
+                texto = (peso[i].get() or "").strip()
+                if texto:
+                    try:
+                        valor_peso = float(texto.replace(",", "."))
+                    except ValueError:
+                        valor_peso = col_original.get("peso", 0)
+            columnas.append({
+                "nombre": col_original.get("nombre") or f"Columna {i + 1}",
+                "incluida": bool(incl),
+                "peso": valor_peso,
+                # Conservar el tipo y la posición dentro de su tipo (ev/área/
+                # otra) tal como venían: la fórmula los necesita para mapear a
+                # la columna física del Excel.
+                "tipo": col_original.get("tipo"),
+                "pos": col_original.get("pos"),
+            })
+        return ColumnConfig(modo=modo, columnas=columnas)
+
+    def _reconstruir_tarjeta(self, idx):
+        """Construye la tarjeta de config de la planilla `idx` (la única visible)."""
+        frame = self._frame_config
+        for w in frame.winfo_children():
+            w.destroy()
+
+        planilla = self.planillas[idx]
+        enc = planilla.get("encabezado") or {}
+        n_areas = generar_excel_notas.calcular_n_areas(enc, planilla.get("estudiantes") or [])
+
+        # Config para esta planilla (si por lo que fuera no existe, crearla).
+        config = self._column_configs.get(idx)
+        if config is None:
+            periodo_raw = enc.get("periodo")
+            periodo_p = 0
+            if (isinstance(periodo_raw, int) and not isinstance(periodo_raw, bool)
+                    and 1 <= periodo_raw <= 4):
+                periodo_p = periodo_raw
+            n_ev = periodo_p - 1 if periodo_p > 0 else 0
+            config = ColumnConfig.crear_desde_planilla(
+                n_areas, n_ev, enc.get("otras_columnas") or []
+            )
+            self._column_configs[idx] = config
+
+        card = ctk.CTkFrame(
+            frame, fg_color=styles.COLOR_BLANCO, corner_radius=12,
+            border_width=1, border_color="#E3E9F5",
+        )
+        card.pack(fill="x", pady=8, padx=2)
+
+        ctk.CTkLabel(
+            card, text=self._nombre_planilla(idx, planilla),
+            font=(styles.FUENTE, styles.TAM_SUBTITULO, "bold"),
+            text_color=styles.COLOR_TEXTO,
+        ).pack(anchor="w", padx=14, pady=(10, 2))
+
+        # Dos columnas: formulario a la izquierda, imagen a la derecha.
+        dos_col = ctk.CTkFrame(card, fg_color="transparent")
+        dos_col.pack(fill="x", padx=10, pady=(0, 8))
+        dos_col.grid_columnconfigure(0, weight=1)
+
+        col_izq = ctk.CTkFrame(dos_col, fg_color="transparent")
+        col_izq.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+
+        col_der = ctk.CTkFrame(dos_col, fg_color="transparent")
+        col_der.grid(row=0, column=1, sticky="n", padx=(8, 0))
+
+        # ── Modo de cálculo (por planilla) ──
+        self._var_modo[idx] = tk.StringVar(value=config.modo)
+        fila_modo = ctk.CTkFrame(col_izq, fg_color="transparent")
+        fila_modo.pack(anchor="w", pady=(0, 4))
+        ctk.CTkRadioButton(
+            fila_modo, text="Promedio simple (todas las notas valen lo mismo)",
+            variable=self._var_modo[idx], value="simple",
+            command=lambda: self._on_modo_changed(idx),
+            font=(styles.FUENTE, styles.TAM_TEXTO_CHICO), text_color=styles.COLOR_TEXTO,
+        ).pack(anchor="w", pady=2)
+        ctk.CTkRadioButton(
+            fila_modo, text="Cada nota tiene su porcentaje (pesos)",
+            variable=self._var_modo[idx], value="pesos",
+            command=lambda: self._on_modo_changed(idx),
+            font=(styles.FUENTE, styles.TAM_TEXTO_CHICO), text_color=styles.COLOR_TEXTO,
+        ).pack(anchor="w", pady=2)
+
+        # ── Formulario de columnas (por planilla) ──
+        frame_col = ctk.CTkFrame(col_izq, fg_color="transparent")
+        frame_col.pack(fill="both", expand=True, pady=(2, 0))
+        self._chk_col_frames[idx] = frame_col
+
+        # ── Aviso de pesos (por planilla) ──
+        label_pesos = ctk.CTkLabel(
+            card, text="", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
+            text_color=styles.COLOR_TEXTO_SECUNDARIO, wraplength=660,
+        )
+        label_pesos.pack(anchor="w", padx=14, pady=(0, 4))
+        self._label_pesos[idx] = label_pesos
+
+        # ── Imagen de la planilla (la seleccionada), clickeable ──
+        self._render_imagen_forma(col_der, planilla, idx + 1, self._dpi_imagen)
+
+        self._reconstruir_formulario_columnas(idx, n_areas)
 
     def _render_imagen_forma(self, contenedor, planilla, indice, dpi):
         """Renderiza la imagen de la planilla (escalada a ~460px) y la hace
@@ -908,65 +975,6 @@ class App(ctk.CTk):
             font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
             text_color=styles.COLOR_TEXTO_SECUNDARIO,
         ).pack(pady=(0, 4))
-
-    def _render_navegador_forma(self, clave_forma, contenedor_der, total):
-        """Navegador "‹ Planilla X de N ›" debajo de la imagen de la forma.
-
-        Solo se crea cuando la forma agrupa más de una planilla (misma
-        cantidad de columnas). Cada clic en ‹/› redibuja la imagen con la
-        planilla anterior/siguiente (con vuelta al final del recorrido).
-        """
-        fila = ctk.CTkFrame(contenedor_der, fg_color="transparent")
-        fila.pack(pady=(0, 4))
-        ctk.CTkButton(
-            fila, text="‹", width=30, height=26,
-            font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
-            fg_color=styles.COLOR_PRINCIPAL, hover_color=styles.COLOR_PRINCIPAL_HOVER,
-            command=lambda f=clave_forma: self._navegar_imagen_forma(f, -1),
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkLabel(
-            fila,
-            text=f"Planilla {self._idx_imagen_forma.get(clave_forma, 0) + 1} de {total}",
-            font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
-            text_color=styles.COLOR_TEXTO_SECUNDARIO, width=110,
-        ).pack(side="left")
-        ctk.CTkButton(
-            fila, text="›", width=30, height=26,
-            font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
-            fg_color=styles.COLOR_PRINCIPAL, hover_color=styles.COLOR_PRINCIPAL_HOVER,
-            command=lambda f=clave_forma: self._navegar_imagen_forma(f, +1),
-        ).pack(side="left", padx=(6, 0))
-
-    def _render_imagen_forma_idx(self, clave_forma, i_idx_planilla):
-        """Redibuja la imagen de la forma mostrando la planilla i_idx_planilla.
-
-        Destruye la columna derecha actual (imagen + navegador) y la vuelve a
-        renderizar con la planilla pedida; conserva el estado de la
-        configuración (el formulario vive en la columna izquierda).
-        """
-        total = len(self._planillas_forma.get(clave_forma, []))
-        if total == 0:
-            return
-        i_idx_planilla %= total
-        self._idx_imagen_forma[clave_forma] = i_idx_planilla
-        contenedor = self._col_der_imagen.get(clave_forma)
-        if contenedor is None:
-            return
-        for w in contenedor.winfo_children():
-            w.destroy()
-        planilla = self._planillas_forma[clave_forma][i_idx_planilla]
-        indice_forma = self._orden_formas.index(clave_forma) + 1
-        self._render_imagen_forma(contenedor, planilla, indice_forma, self._dpi_imagen)
-        if total > 1:
-            self._render_navegador_forma(clave_forma, contenedor, total)
-
-    def _navegar_imagen_forma(self, clave_forma, delta):
-        """Mueve la imagen de la forma ±1 planilla (con vuelta al final)."""
-        total = len(self._planillas_forma.get(clave_forma, []))
-        if total <= 1:
-            return
-        actual = self._idx_imagen_forma.get(clave_forma, 0)
-        self._render_imagen_forma_idx(clave_forma, (actual + delta) % total)
 
     def _ver_planilla_grande(self, planilla):
         """Muestra la planilla completa como OVERLAY encima de esta ventana,
@@ -1099,8 +1107,8 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
-    def _reconstruir_formulario_columnas(self, clave_forma, n_areas):
-        """Reconstruye el formulario de columnas de UNA forma según el modo
+    def _reconstruir_formulario_columnas(self, idx, n_areas):
+        """Reconstruye el formulario de columnas de UNA planilla según el modo
         elegido, como una tabla recreada de la planilla (mini-Excel):
 
         - Fila 0 (selección): un checkbox por cada columna candidata
@@ -1113,18 +1121,18 @@ class App(ctk.CTk):
           cantidad de columnas); el scroll vertical lo da toda la pantalla.
 
         La "Definitiva" se muestra pero nunca se marca. Los estados de widgets
-        son POR FORMA. Las columnas candidatas salen de la columnas de la
+        son POR PLANILLA (índice `idx`). Las columnas candidatas salen de la
         config (que ya llevan `tipo` y `pos`).
         """
-        frame_col = self._chk_col_frames[clave_forma]
+        frame_col = self._chk_col_frames[idx]
         for w in frame_col.winfo_children():
             w.destroy()
 
-        config = self._column_configs[clave_forma]
-        modo = self._var_modo[clave_forma].get()
-        self._chk_col[clave_forma] = {}   # índice -> BooleanVar
-        self._peso_col[clave_forma] = {}  # índice -> StringVar
-        self._peso_entry[clave_forma] = {}  # índice -> CTkEntry de peso
+        config = self._column_configs[idx]
+        modo = self._var_modo[idx].get()
+        self._chk_col[idx] = {}   # índice -> BooleanVar
+        self._peso_col[idx] = {}  # índice -> StringVar
+        self._peso_entry[idx] = {}  # índice -> CTkEntry de peso
 
         # Límite sanitizador: la tabla no muestra más de 16 columnas
         # candidatas (ev + áreas + otras). Si se supera, se recortan las
@@ -1141,13 +1149,9 @@ class App(ctk.CTk):
             return
 
         n_cand = len(columnas)
-        planillas_forma = self._planillas_forma.get(clave_forma, [])
-        muestra = []
-        if planillas_forma:
-            # TODOS los estudiantes de la planilla: la tabla crece hasta la
-            # ultima fila y el scroll principal de la pantalla (`_frame_formas`)
-            # deja ver la lista completa.
-            muestra = planillas_forma[0].get("estudiantes") or []
+        # TODOS los estudiantes de la planilla: la tabla crece hasta la última
+        # fila y el scroll vertical de la tarjeta deja ver la lista completa.
+        muestra = self.planillas[idx].get("estudiantes") or []
 
         ancho_no = 38
         ancho_nombre = 150
@@ -1156,7 +1160,7 @@ class App(ctk.CTk):
 
         # Tabla con scroll horizontal (todas las columnas candidatas) y altura
         # natural = seleccion + cabecera + TODOS los estudiantes (~27px/fila).
-        # No se anida otro scroll vertical: la pantalla ya scrollea completo.
+        # No se anida otro scroll vertical: la tarjeta ya scrollea completo.
         altura_tabla = 46 + len(muestra) * 27
         tabla = ctk.CTkScrollableFrame(
             frame_col, orientation="horizontal", height=altura_tabla,
@@ -1184,15 +1188,15 @@ class App(ctk.CTk):
             celda = ctk.CTkFrame(tabla, fg_color="transparent")
             celda.grid(row=0, column=g, padx=2, pady=(3, 0))
             var_chk = tk.BooleanVar(value=col.get("incluida", True))
-            self._chk_col[clave_forma][ci] = var_chk
+            self._chk_col[idx][ci] = var_chk
             ctk.CTkCheckBox(
                 celda, text="", variable=var_chk, width=24,
-                command=lambda f=clave_forma, idx=ci: self._on_toggle_col(f, idx),
+                command=lambda idx=idx, ci=ci: self._on_toggle_col(idx, ci),
                 checkbox_width=18, checkbox_height=18,
             ).pack(anchor="center", pady=(0, 1))
             if modo == "pesos":
                 var_peso = tk.StringVar(value=_fmt_peso(col.get("peso")))
-                self._peso_col[clave_forma][ci] = var_peso
+                self._peso_col[idx][ci] = var_peso
                 entrada = ctk.CTkEntry(
                     celda, textvariable=var_peso, width=ancho_cand - 12, height=22,
                     font=(styles.FUENTE, 9), fg_color=styles.COLOR_FONDO_SECUNDARIO,
@@ -1202,7 +1206,7 @@ class App(ctk.CTk):
                 entrada.configure(
                     state="normal" if col.get("incluida", True) else "disabled"
                 )
-                self._peso_entry[clave_forma][ci] = entrada
+                self._peso_entry[idx][ci] = entrada
 
         # ── Fila 1: cabecera ──
         ctk.CTkLabel(tabla, text="No.", font=fuentes_cab, text_color=styles.COLOR_TEXTO,
@@ -1220,7 +1224,7 @@ class App(ctk.CTk):
                      text_color=styles.COLOR_TEXTO_SECUNDARIO, anchor="center", width=ancho_def,
                      ).grid(row=1, column=2 + n_cand, sticky="nsew", padx=1, pady=1)
 
-        # ── Filas 2..~10: los primeros estudiantes con sus valores ──
+        # ── Filas 2..N: los estudiantes con sus valores ──
         for rid, est in enumerate(muestra):
             fila_ui = 2 + rid
             ctk.CTkLabel(tabla, text=str(est.get("no") or ""), font=fuentes_celda,
@@ -1239,30 +1243,32 @@ class App(ctk.CTk):
             ctk.CTkLabel(tabla, text="", width=ancho_def,
                          ).grid(row=fila_ui, column=2 + n_cand, padx=1)
 
-        self._actualizar_resumen_pesos(clave_forma)
+        self._actualizar_resumen_pesos(idx)
 
-    def _on_modo_changed(self, clave_forma):
-        """Reconstruye el formulario de UNA forma cuando cambia simple ↔ pesos."""
-        n_areas = clave_forma[1]
-        self._reconstruir_formulario_columnas(clave_forma, n_areas)
+    def _on_modo_changed(self, idx):
+        """Reconstruye el formulario de UNA planilla cuando cambia simple ↔ pesos."""
+        planilla = self.planillas[idx]
+        enc = planilla.get("encabezado") or {}
+        n = generar_excel_notas.calcular_n_areas(enc, planilla.get("estudiantes") or [])
+        self._reconstruir_formulario_columnas(idx, n)
 
-    def _on_toggle_col(self, clave_forma, idx):
+    def _on_toggle_col(self, idx, ci):
         """Habilita/deshabilita el campo de peso cuando se marca una columna."""
-        if idx in self._peso_col[clave_forma] and idx in self._peso_entry[clave_forma]:
-            self._peso_entry[clave_forma][idx].configure(
-                state="normal" if self._chk_col[clave_forma][idx].get() else "disabled"
+        if ci in self._peso_col[idx] and ci in self._peso_entry[idx]:
+            self._peso_entry[idx][ci].configure(
+                state="normal" if self._chk_col[idx][ci].get() else "disabled"
             )
-        self._actualizar_resumen_pesos(clave_forma)
+        self._actualizar_resumen_pesos(idx)
 
-    def _actualizar_resumen_pesos(self, clave_forma):
-        """Muestra la suma actual de porcentajes de UNA forma (y si no llega a 100)."""
-        modo = self._var_modo[clave_forma].get()
-        label = self._label_pesos[clave_forma]
+    def _actualizar_resumen_pesos(self, idx):
+        """Muestra la suma actual de porcentajes de UNA planilla (y si no llega a 100)."""
+        modo = self._var_modo[idx].get()
+        label = self._label_pesos[idx]
         if modo != "pesos":
             label.configure(text="")
             return
         incluidas = [
-            i for i, var in self._chk_col[clave_forma].items() if var.get()
+            i for i, var in self._chk_col[idx].items() if var.get()
         ]
         if not incluidas:
             label.configure(
@@ -1273,7 +1279,7 @@ class App(ctk.CTk):
         total = 0.0
         for i in incluidas:
             try:
-                total += float((self._peso_col[clave_forma][i].get() or "").replace(",", "."))
+                total += float((self._peso_col[idx][i].get() or "").replace(",", "."))
             except ValueError:
                 pass
         if abs(total - 100.0) < 0.01:
@@ -1292,67 +1298,76 @@ class App(ctk.CTk):
 
     def _validar_configuracion(self) -> bool:
         """
-        Lee el formulario de CADA forma, actualiza `self._column_configs` y valida:
+        Lee el formulario de CADA planilla, actualiza `self._column_configs` y valida:
 
-        - Al menos una columna marcada por forma.
+        - Al menos una columna marcada por planilla.
         - En modo pesos: cada columna marcada tiene un porcentaje numérico
           >= 0, y la suma da ≈ 100 (con tolerancia 0.01).
         Devuelve True si todo está OK; si no, muestra un error amigable y
         devuelve False.
         """
-        por_forma, orden_formas = agrupar_por_forma(self.planillas)
-        if not orden_formas:
-            return False
+        for i in range(len(self.planillas)):
+            p = self.planillas[i]
+            enc = p.get("encabezado") or {}
+            grupo = enc.get("grupo") or ""
+            asignatura = enc.get("asignatura") or "SIN ASIGNATURA"
+            n_areas = generar_excel_notas.calcular_n_areas(enc, p.get("estudiantes") or [])
 
-        for clave_forma in orden_formas:
-            n_areas = clave_forma[1]
+            # Si la planilla nunca se seleccionó en el combobox, no tiene
+            # widgets: se conserva la config guardada (default o previa).
+            if i not in self._var_modo:
+                base = self._column_configs.get(i) or ColumnConfig.crear_desde_planilla(n_areas)
+                self._column_configs[i] = base
+                continue
+
             config_original = self._column_configs.get(
-                clave_forma, ColumnConfig.crear_desde_planilla(n_areas)
+                i, ColumnConfig.crear_desde_planilla(n_areas)
             )
 
-            modo = self._var_modo[clave_forma].get()
-            chk = self._chk_col[clave_forma]
-            peso = self._peso_col[clave_forma]
+            modo = self._var_modo[i].get()
+            chk = self._chk_col[i]
+            peso = self._peso_col[i]
 
             # Reconstruir la lista de columnas desde la config original,
             # conservando SIEMPRE su `tipo` y `pos` (nunca se reescriben desde
             # el nombre); el checkbox y el peso se leen de la UI.
             columnas = []
-            for i, col_original in enumerate(config_original.columnas):
-                incl = chk[i].get() if i in chk else col_original.get("incluida", True)
+            for j, col_original in enumerate(config_original.columnas):
+                incl = chk[j].get() if j in chk else col_original.get("incluida", True)
                 valor_peso = col_original.get("peso", 0)
-                if i in peso:
-                    texto = (peso[i].get() or "").strip()
+                if j in peso:
+                    texto = (peso[j].get() or "").strip()
                     if texto:
                         try:
                             valor_peso = float(texto.replace(",", "."))
                         except ValueError:
                             messagebox.showerror(
                                 "Porcentaje inválido",
-                                f"El porcentaje de la columna \"{col_original.get('nombre', f'Columna {i+1}')}\" "
+                                f"El porcentaje de la columna \"{col_original.get('nombre', f'Columna {j+1}')}\" "
+                                f"de la Planilla {i+1} ({asignatura} - Grupo {grupo}) "
                                 "no es un número válido. Usá punto o coma para decimales (ej. 33.3).",
                             )
                             return False
                 columnas.append({
-                    "nombre": col_original.get("nombre") or f"Columna {i+1}",
+                    "nombre": col_original.get("nombre") or f"Columna {j+1}",
                     "incluida": bool(incl),
                     "peso": valor_peso,
                     # Conservar el tipo y la posición dentro de su tipo tal como
-                    # venían (ev o área): la fórmula los necesita para mapear a
-                    # la columna física del Excel.
+                    # venían (ev, área u otra): la fórmula los necesita para
+                    # mapear a la columna física del Excel.
                     "tipo": col_original.get("tipo"),
                     "pos": col_original.get("pos"),
                 })
 
             config_nueva = ColumnConfig(modo=modo, columnas=columnas)
 
-            # ── Validaciones por forma ──
+            # ── Validaciones por planilla ──
             seleccionadas = [c for c in columnas if c["incluida"]]
             if not seleccionadas:
                 messagebox.showerror(
                     "Falta elegir columnas",
-                    "En la forma de " + _n_descripcion(n_areas) +
-                    " tenés que marcar al menos una columna de notas para calcular la definitiva.",
+                    f"En la Planilla {i+1} ({asignatura} - Grupo {grupo}) tenés que "
+                    "marcar al menos una columna de notas para calcular la definitiva.",
                 )
                 return False
 
@@ -1367,13 +1382,13 @@ class App(ctk.CTk):
                 if not config_nueva.pesos_suman_cien():
                     messagebox.showerror(
                         "Los porcentajes no suman 100",
-                        f"En la forma de {_n_descripcion(n_areas)} los porcentajes suman "
-                        f"{sum(c['peso'] for c in seleccionadas):.1f}% y deben sumar 100%. "
-                        "Revisá los valores e intentá de nuevo.",
+                        f"En la Planilla {i+1} ({asignatura} - Grupo {grupo}) los "
+                        f"porcentajes suman {sum(c['peso'] for c in seleccionadas):.1f}% "
+                        "y deben sumar 100%. Revisá los valores e intentá de nuevo.",
                     )
                     return False
 
-            self._column_configs[clave_forma] = config_nueva
+            self._column_configs[i] = config_nueva
 
         return True
 

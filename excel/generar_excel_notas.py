@@ -461,13 +461,20 @@ def _resolver_column_config(planilla: dict, column_config, column_configs):
     """
     Resuelve la ColumnConfig para una planilla según la precedencia:
 
-    - Si `column_configs` no es None -> se busca por clave de forma
-      `_clave_forma(planilla)`; si no hay clave para esa planilla -> None
-      (legacy para ese grupo).
+    - Si `column_configs` no es None:
+        - Nuevo: si la planilla tiene `_idx` y `column_configs` tiene esa key
+          (config por ÍNDICE de planilla, no por forma), se devuelve esa.
+        - Legacy: se busca por clave de forma `_clave_forma(planilla)`; si no
+          hay clave para esa planilla -> None (legacy para ese grupo).
     - Si `column_configs` es None y `column_config` no -> la única config.
     - Ambos None -> None (legacy histórico).
     """
     if column_configs is not None:
+        # Nuevo: config por índice de planilla (cada planilla, independiente).
+        idx = planilla.get("_idx")
+        if idx is not None and idx in column_configs:
+            return column_configs[idx]
+        # Legacy: config por forma (cantidad de columnas).
         return column_configs.get(_clave_forma(planilla))
     return column_config
 
@@ -493,7 +500,6 @@ def generar_excel_planilla(planilla: dict, ruta_salida: str, column_config=None,
     _escribir_hoja(ws, planilla, config)
     wb.save(ruta_salida)
     return ruta_salida
-
 
 def generar_excel_asignatura(planillas: list, ruta_salida: str, column_config=None,
                              column_configs=None):
@@ -527,6 +533,10 @@ def generar_excel_asignatura(planillas: list, ruta_salida: str, column_config=No
         paginas = por_curso[clave]
         base = dict(paginas[0])
         base["estudiantes"] = combinar_estudiantes(paginas)
+        # Copiar _idx (índice de planilla) para que _resolver_column_config
+        # resuelva la config por planilla, no por forma (spec por planilla).
+        if "_idx" in paginas[0]:
+            base["_idx"] = paginas[0]["_idx"]
         planilla_final = base
 
         # Resolver la config de ESTA forma para este grupo (None si no aplica).

@@ -452,6 +452,142 @@ class TestExcelPorFormaConColumnConfigs(unittest.TestCase):
         self.assertNotIn("Modo de cálculo", valores4)
 
 
+class TestResolverColumnConfigPorIndice(unittest.TestCase):
+    """_resolver_column_config: la config se resuelve POR PLANILLA cuando el
+    dict `column_configs` está keyeado por índice de planilla (`_idx`).
+
+    Este es el fix del bug: dos planillas con la MISMA cantidad de columnas
+    (misma forma) no deben compartir config; cada una usa la suya.
+    """
+
+    def test_resolver_por_indice_mismo_forma(self):
+        # Dos planillas con 4 columnas (MISMA forma): el resolver por índice
+        # las separa y cada una usa su propia config.
+        p0 = _planilla([[40, 50, 60, 70]], n_area_trabajo=4)
+        p0["_idx"] = 0
+        p1 = _planilla([[40, 50, 60, 70]], n_area_trabajo=4)
+        p1["_idx"] = 1
+
+        cfg0 = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "Área Trabajo 1", "incluida": True, "peso": 60},
+            {"nombre": "Área Trabajo 2", "incluida": True, "peso": 40},
+            {"nombre": "Área Trabajo 3", "incluida": False, "peso": 0},
+            {"nombre": "Área Trabajo 4", "incluida": False, "peso": 0},
+        ])
+        cfg1 = ColumnConfig(columnas=[
+            {"nombre": "Área Trabajo 1", "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 2", "incluida": False, "peso": 0},
+            {"nombre": "Área Trabajo 3", "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 4", "incluida": False, "peso": 0},
+        ])
+
+        configs = {0: cfg0, 1: cfg1}
+        self.assertIs(generador._resolver_column_config(p0, None, configs), cfg0)
+        self.assertIs(generador._resolver_column_config(p1, None, configs), cfg1)
+
+    def test_resolver_por_indice_ignora_forma_legacy(self):
+        # Planilla con `_idx` presente: aunque el dict también tenga la clave
+        # de forma, gana el índice (no la forma).
+        p0 = _planilla([[40, 50]], n_area_trabajo=2)
+        p0["_idx"] = 0
+        cfg_idx = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "Área Trabajo 1", "incluida": True, "peso": 60},
+            {"nombre": "Área Trabajo 2", "incluida": True, "peso": 40},
+        ])
+        cfg_forma = ColumnConfig(columnas=[
+            {"nombre": "Área Trabajo 1", "incluida": True, "peso": 50},
+            {"nombre": "Área Trabajo 2", "incluida": True, "peso": 50},
+        ])
+        configs = {0: cfg_idx, ("n_areas", 2): cfg_forma}
+        self.assertIs(generador._resolver_column_config(p0, None, configs), cfg_idx)
+
+    def test_resolver_legacy_por_forma_sin_idx(self):
+        # Planillas SIN `_idx` (retrocompat): se resuelve por forma.
+        p2 = _planilla([[40, 50]], n_area_trabajo=2)
+        p4 = _planilla([[40, 50, 60, 70]], n_area_trabajo=4)
+        cfg2 = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "Área Trabajo 1", "incluida": True, "peso": 60},
+            {"nombre": "Área Trabajo 2", "incluida": True, "peso": 40},
+        ])
+        cfg4 = ColumnConfig(columnas=[
+            {"nombre": "Área Trabajo 1", "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 2", "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 3", "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 4", "incluida": True, "peso": 25},
+        ])
+        configs = {("n_areas", 2): cfg2, ("n_areas", 4): cfg4}
+        self.assertIs(generador._resolver_column_config(p2, None, configs), cfg2)
+        self.assertIs(generador._resolver_column_config(p4, None, configs), cfg4)
+
+    def test_resolver_sin_configs_cae_a_column_config(self):
+        p = _planilla([[40, 50]], n_area_trabajo=2)
+        p["_idx"] = 3
+        cfg = ColumnConfig(columnas=[
+            {"nombre": "A1", "incluida": True, "peso": 100},
+            {"nombre": "A2", "incluida": False, "peso": 0},
+        ])
+        self.assertIs(generador._resolver_column_config(p, cfg, None), cfg)
+        self.assertIsNone(generador._resolver_column_config(p, None, None))
+
+
+class TestExcelPorIndiceConColumnConfigs(unittest.TestCase):
+    """generar_excel_asignatura con `column_configs={indice: ColumnConfig}`:
+    cada hoja usa la config de SU planilla, aunque comparta forma con otra."""
+
+    def test_mismo_forma_cada_hoja_usa_la_config_de_su_planilla(self):
+        # Dos planillas con 4 columnas (MISMA forma) pero configs distintas:
+        # la hoja de cada una debe usar la config de su planilla.
+        p0 = _planilla([[40, 50, 60, 70], [41, 51, 61, 71]], n_area_trabajo=4)
+        p0["encabezado"]["grupo"] = "0201"
+        p0["_idx"] = 0
+        p1 = _planilla([[40, 50, 60, 70], [41, 51, 61, 71]], n_area_trabajo=4)
+        p1["encabezado"]["grupo"] = "0401"
+        p1["_idx"] = 1
+
+        cfg0 = ColumnConfig(modo="pesos", columnas=[
+            {"nombre": "Área Trabajo 1", "incluida": True, "peso": 60},
+            {"nombre": "Área Trabajo 2", "incluida": True, "peso": 40},
+            {"nombre": "Área Trabajo 3", "incluida": False, "peso": 0},
+            {"nombre": "Área Trabajo 4", "incluida": False, "peso": 0},
+        ])
+        cfg1 = ColumnConfig(columnas=[
+            {"nombre": "Área Trabajo 1", "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 2", "incluida": False, "peso": 0},
+            {"nombre": "Área Trabajo 3", "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 4", "incluida": False, "peso": 0},
+        ])
+
+        directorio = tempfile.mkdtemp(prefix="notas_por_indice_")
+        ruta = os.path.join(directorio, "salida.xlsx")
+        generador.generar_excel_asignatura(
+            [p0, p1], ruta, column_configs={0: cfg0, 1: cfg1}
+        )
+
+        wb = openpyxl.load_workbook(ruta)
+        ws0 = wb["Curso 0201 - MATEMATICAS"]
+        ws1 = wb["Curso 0401 - MATEMATICAS"]
+
+        # Misma forma (4 áreas E..H, definitiva en I(9)) pero fórmulas
+        # distintas: la de cada planilla.
+        hr0 = _fila_header(ws0)
+        fila0 = hr0 + 1
+        self.assertEqual(ws0.cell(row=fila0, column=9).value,
+                         '=IFERROR((E{f}*60+F{f}*40)/100,"")'.format(f=fila0))
+
+        hr1 = _fila_header(ws1)
+        fila1 = hr1 + 1
+        self.assertEqual(ws1.cell(row=fila1, column=9).value,
+                         '=IFERROR(AVERAGE(E{f},G{f}),"")'.format(f=fila1))
+
+        # La info de cada hoja refleja su propia config.
+        valores0 = [ws0.cell(row=r, column=1).value for r in range(1, hr0)]
+        self.assertIn("Modo de cálculo", valores0)
+        self.assertIn("Pesos", valores0)
+        valores1 = [ws1.cell(row=r, column=1).value for r in range(1, hr1)]
+        self.assertIn("Modo de cálculo", valores1)
+        self.assertNotIn("Pesos", valores1)
+
+
 def _planilla_con_otras(area_por_alumno, otras_por_alumno, n_area_trabajo=None,
                         otras_columnas=None, periodo=3):
     """Planilla con columnas "otras" (trabajo práctico, parcial, etc.).
