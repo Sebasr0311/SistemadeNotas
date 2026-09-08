@@ -51,6 +51,18 @@ class App(ctk.CTk):
         self._worker_cola = None
         self._worker = None
 
+        # Contenedor único donde se montan las pantallas.
+        self._contenedor = ctk.CTkFrame(self, fg_color=styles.COLOR_FONDO)
+        self._contenedor.pack(fill="both", expand=True)
+        self._pantalla_actual = None
+
+        self._mostrar_inicio()
+
+        # S9: la X de la ventana pasa por acá. Antes, cerrar con el worker
+        # activo mataba el hilo daemon a mitad de proceso y la GUI podía
+        # programar afters sobre una ventana ya destruida.
+        self.protocol("WM_DELETE_WINDOW", self._al_cerrar)
+
     @property
     def _column_config(self):
         """Compatibilidad: devuelve la config de la primera forma si existe.
@@ -78,18 +90,6 @@ class App(ctk.CTk):
         elif not self._column_configs:
             # Sin columnas: guardar bajo una forma genérica de 0 para no perderlo.
             self._column_configs[("n_areas", 0)] = valor
-
-        # Contenedor único donde se montan las pantallas.
-        self._contenedor = ctk.CTkFrame(self, fg_color=styles.COLOR_FONDO)
-        self._contenedor.pack(fill="both", expand=True)
-        self._pantalla_actual = None
-
-        self._mostrar_inicio()
-
-        # S9: la X de la ventana pasa por acá. Antes, cerrar con el worker
-        # activo mataba el hilo daemon a mitad de proceso y la GUI podía
-        # programar afters sobre una ventana ya destruida.
-        self.protocol("WM_DELETE_WINDOW", self._al_cerrar)
 
     def _al_cerrar(self):
         """Cierra la ventana de forma segura (S9).
