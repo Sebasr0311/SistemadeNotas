@@ -893,8 +893,16 @@ class App(ctk.CTk):
         ).pack(pady=(0, 4))
 
     def _ver_planilla_grande(self, planilla):
-        """Abre una ventana con la planilla completa (imagen a tamaño natural)
-        dentro de un Canvas con scrollbars si es más grande que la pantalla."""
+        """Muestra la planilla completa como OVERLAY encima de esta ventana,
+        sin abrir otra pestaña:
+
+        - Capa de fondo: oscurece la ventana actual con una capa translúcida
+          que deja ver (atenuada) la lista de estudiantes que se está
+          configurando, para poder ir comparando con la imagen.
+        - Capa de la imagen: la planilla, nítida y centrada.
+        - Rueda del mouse sobre la imagen: zoom (arriba agranda, abajo aleja).
+        - Cerrar: clic en el fondo, botón Cerrar o tecla Escape.
+        """
         imagen = pdf_loader.render_imagen_planilla(
             planilla,
             int(app_config.load_config().get("preferencias", {}).get("dpi_pdf") or 250),
@@ -903,48 +911,117 @@ class App(ctk.CTk):
             messagebox.showinfo("Planilla completa", "No se pudo obtener la imagen de esta planilla.")
             return
 
-        ventana = ctk.CTkToplevel(self)
-        ventana.title("Planilla completa")
-        ventana.geometry("880x680")
-        ventana.minsize(500, 400)
-        # Referencia persistente: si la ventana queda solo en una variable local,
-        # el garbage collector puede destruirla cuando termina este método
-        # (síntoma: aparece medio segundo y se cierra sola).
-        self._ventana_planilla = ventana
+        self.update_idletasks()
+        px, py = self.winfo_rootx(), self.winfo_rooty()
+        pw, ph = self.winfo_width(), self.winfo_height()
+        if pw < 80 or ph < 80:  # defensivo si la ventana aún no tiene tamaño
+            px, py, pw, ph = 0, 0, 1000, 700
 
-        ancho, alto = imagen.size
-        # Para el Canvas se usa un PhotoImage de PIL (CTkImage sirve para los
-        # widgets de customtkinter, no para tk.Canvas).
-        from PIL import ImageTk
-        foto = ImageTk.PhotoImage(imagen)
-        imagen.close()
-
-        # Canvas + scrollbars para cuando la imagen es más grande que la ventana.
-        lienzo = tk.Canvas(
-            ventana, highlightthickness=0, bg="#FFFFFF",
-            scrollregion=(0, 0, ancho, alto),
+        self._overlay_origen = (px, py, pw, ph)
+        self._overlay_imagen_original = imagen
+        self._overlay_zoom = 1.0
+        ancho_im, alto_im = imagen.size
+        self._overlay_escala_base = min(
+            (pw * 0.86) / ancho_im, (ph * 0.84) / alto_im, 1.0
         )
-        barra_v = ttk.Scrollbar(ventana, orient="vertical", command=lienzo.yview)
-        barra_h = ttk.Scrollbar(ventana, orient="horizontal", command=lienzo.xview)
-        lienzo.configure(yscrollcommand=barra_v.set, xscrollcommand=barra_h.set)
 
-        lienzo.grid(row=0, column=0, sticky="nsew")
-        barra_v.grid(row=0, column=1, sticky="ns")
-        barra_h.grid(row=1, column=0, sticky="ew")
-        ventana.grid_rowconfigure(0, weight=1)
-        ventana.grid_columnconfigure(0, weight=1)
+        # ── Capa de fondo translúcida: cubre la ventana, deja ver detrás ──
+        fondo = ctk.CTkToplevel(self)
+        fondo.overrideredirect(True)
+        fondo.geometry(f"{pw}x{ph}+{px}+{py}")
+        fondo.attributes("-topmost", True)
+        fondo.attributes("-alpha", 0.82)
+        fondo.configure(fg_color="#0A0E17")
+        fondo.bind("<Button-1>", lambda e: self._cerrar_overlay_planilla())
+        fondo.bind("<Escape>", lambda e: self._cerrar_overlay_planilla())
+        self._overlay_fondo = fondo
 
-        lienzo.create_image(0, 0, anchor="nw", image=foto)
-        # Referencia para que no se recolecte la imagen.
-        lienzo._img_ref = foto
+        # ── Capa de la imagen: marco blanco con la imagen nítida ──
+        marco = ctk.CTkToplevel(self)
+        marco.overrideredirect(True)
+        marco.configure(fg_color="#FFFFFF")
+        marco.attributes("-topmost", True)
+        marco.bind("<Escape>", lambda e: self._cerrar_overlay_planilla())
+        self._overlay_marco = marco
 
-        fila_btn = ctk.CTkFrame(ventana, fg_color="transparent")
-        fila_btn.grid(row=2, column=0, columnspan=2, pady=(8, 10))
+        fila_btn = ctk.CTkFrame(marco, fg_color="transparent")
+        fila_btn.pack(fill="x", padx=10, pady=(8, 4))
         ctk.CTkButton(
-            fila_btn, text="Cerrar", height=38, width=120,
-            font=(styles.FUENTE, styles.TAM_TEXTO), fg_color=styles.COLOR_PRINCIPAL,
-            hover_color=styles.COLOR_PRINCIPAL_HOVER, command=ventana.destroy,
-        ).pack()
+            fila_btn, text="Cerrar ✕", height=30, width=90,
+            font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
+            fg_color=styles.COLOR_PRINCIPAL, hover_color=styles.COLOR_PRINCIPAL_HOVER,
+            command=self._cerrar_overlay_planilla,
+        ).pack(side="right")
+
+        contenedor = ctk.CTkFrame(marco, fg_color="#FFFFFF")
+        contenedor.pack(fill="both", expand=True, padx=4, pady=(0, 6))
+        etiqueta = ctk.CTkLabel(contenedor, text="")
+        etiqueta.pack()
+        etiqueta.bind("<MouseWheel>", self._overlay_zoom_rueda)
+        # Clic sobre la imagen no cierra el overlay (solo se cierra al hacer
+        # clic en el fondo oscuro o en Cerrar).
+        etiqueta.bind("<Button-1>", lambda e: "break")
+        self._overlay_etiqueta = etiqueta
+
+        self._dibujar_overlay_planilla()
+
+    def _dibujar_overlay_planilla(self):
+        """(Re)dibuja la imagen del overlay al zoom actual y reubica el marco."""
+        from PIL import Image, ImageTk
+
+        imagen = self._overlay_imagen_original
+        escala = self._overlay_escala_base * self._overlay_zoom
+        ancho_im, alto_im = imagen.size
+        ancho_vis = max(1, int(ancho_im * escala))
+        alto_vis = max(1, int(alto_im * escala))
+        if escala < 1.0:
+            vis = imagen.resize((ancho_vis, alto_vis), Image.LANCZOS)
+            foto = ImageTk.PhotoImage(vis)
+            vis.close()
+        else:
+            foto = ImageTk.PhotoImage(imagen)
+        self._overlay_foto = foto  # referencia persistente (GC)
+
+        pady_botones = 46
+        ancho_marco = ancho_vis + 16
+        alto_marco = alto_vis + 16 + pady_botones
+        px, py, pw, ph = self._overlay_origen
+        x = px + (pw - ancho_marco) // 2
+        y = py + (ph - alto_marco) // 2
+        self._overlay_etiqueta.configure(image=foto)
+        self._overlay_marco.geometry(f"{ancho_marco}x{alto_marco}+{x}+{y}")
+
+    def _overlay_zoom_rueda(self, event):
+        """Zoom con la rueda del mouse sobre la imagen (límites 0.25x..4x)."""
+        factor = 1.15 if event.delta > 0 else 1 / 1.15
+        nuevo = self._overlay_zoom * factor
+        if 0.25 <= nuevo <= 4.0:
+            self._overlay_zoom = nuevo
+            self._dibujar_overlay_planilla()
+        return "break"
+
+    def _cerrar_overlay_planilla(self):
+        """Cierra el overlay de la planilla y libera las referencias."""
+        for attr in ("_overlay_fondo", "_overlay_marco"):
+            ventana = getattr(self, attr, None)
+            if ventana is not None:
+                try:
+                    ventana.destroy()
+                except Exception:
+                    pass
+        imagen = getattr(self, "_overlay_imagen_original", None)
+        for attr in ("_overlay_fondo", "_overlay_marco", "_overlay_foto",
+                     "_overlay_imagen_original", "_overlay_etiqueta",
+                     "_overlay_origen", "_overlay_zoom", "_overlay_escala_base"):
+            try:
+                delattr(self, attr)
+            except AttributeError:
+                pass
+        if imagen is not None:
+            try:
+                imagen.close()
+            except Exception:
+                pass
 
     def _reconstruir_formulario_columnas(self, clave_forma, n_areas):
         """Reconstruye el formulario de columnas de UNA forma según el modo
