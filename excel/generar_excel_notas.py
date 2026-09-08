@@ -25,11 +25,16 @@ class ColumnConfig:
 
     Attributes:
         modo: "simple" (promedio aritmético) o "pesos" (ponderado).
-        columnas: lista de dicts, uno por cada columna de Área de Trabajo:
+        columnas: lista de dicts, uno por cada columna de notas candidata
+            ("Def. Periodo 1..N" y/o "Área Trabajo 1..M"):
             {
                 "nombre": str,       # Nombre legible (ej. "Área Trabajo 1")
                 "incluida": bool,    # True si entra al cálculo de la definitiva
                 "peso": float,       # Porcentaje (0-100). Solo relevante si modo == "pesos".
+                "tipo": str,         # "ev" (Def. Periodo) o "area" (Área Trabajo).
+                                     # Retrocompat: ausente => "area".
+                "pos": int,          # índice 0-based dentro de su tipo.
+                                     # Retrocompat: ausente => índice en la lista.
             }
     """
 
@@ -75,16 +80,35 @@ class ColumnConfig:
         return cls(modo=data.get("modo", "simple"), columnas=data.get("columnas", []))
 
     @classmethod
-    def crear_desde_planilla(cls, n_columnas):
-        """Crea una config por defecto: simple, todas las columnas incluidas, peso=100/n."""
-        peso = round(100.0 / n_columnas, 1) if n_columnas > 0 else 0
-        return cls(
-            modo="simple",
-            columnas=[
-                {"nombre": f"Área Trabajo {k+1}", "incluida": True, "peso": peso}
-                for k in range(n_columnas)
-            ],
-        )
+    def crear_desde_planilla(cls, n_areas, n_ev=0):
+        """Crea una config por defecto: simple, todas las columnas incluidas,
+        peso por defecto = 100 / total.
+
+        Si `n_ev > 0`, la lista empieza con las "Def. Periodo 1..n_ev" (campo
+        `ev_anteriores`, tipo "ev") y sigue con las "Área Trabajo 1..n_areas"
+        (tipo "area"). Con el default `n_ev=0` se conserva el comportamiento
+        histórico (solo columnas de área).
+        """
+        total = n_areas + n_ev
+        peso = round(100.0 / total, 1) if total > 0 else 0
+        columnas = []
+        for k in range(n_ev):
+            columnas.append({
+                "nombre": f"Def. Periodo {k+1}",
+                "tipo": "ev",
+                "pos": k,
+                "incluida": True,
+                "peso": peso,
+            })
+        for k in range(n_areas):
+            columnas.append({
+                "nombre": f"Área Trabajo {k+1}",
+                "tipo": "area",
+                "pos": k,
+                "incluida": True,
+                "peso": peso,
+            })
+        return cls(modo="simple", columnas=columnas)
 
 
 def nombres_columnas_areas(enc, n_areas):
@@ -92,40 +116,63 @@ def nombres_columnas_areas(enc, n_areas):
     return [f"Área Trabajo {k+1}" for k in range(n_areas)]
 
 
-def _formula_definitiva(col_at1, col_def_menos1, r, n_columnas_total,
-                        column_config=None):
+def _ref_columna(col_ev_start, col_at1, r, i, col):
+    """Resuelve la referencia de celda de una columna candidata según su tipo.
+
+    Devuelve la referencia completa con fila (ej. "C12").
+
+    - tipo "ev"   -> letra de `col_ev_start + pos` + fila `r`.
+    - tipo "area" (o sin tipo, retrocompat) -> letra de `col_at1 + pos` + fila `r`.
+      Si no hay `pos`, se usa el índice `i` en la lista (comportamiento histórico,
+      donde todas las columnas eran de área).
+    """
+    from openpyxl.utils import get_column_letter as gcl
+
+    tipo = col.get("tipo")
+    if tipo == "ev":
+        return f"{gcl(col_ev_start + col.get('pos', 0))}{r}"
+    pos = col.get("pos")
+    if pos is None:
+        pos = i
+    return f"{gcl(col_at1 + pos)}{r}"
+
+
+def _formula_definitiva(col_ev_start, col_at1, r, n_areas, column_config=None):
     """
     Genera la fórmula de Excel para la definitiva de un curso.
 
     Parámetros:
+        col_ev_start: columna de la primera "Def. Periodo" (1-based)
         col_at1: columna de la primera Área de Trabajo (1-based)
-        col_def_menos1: columna justo antes de la Definitiva (1-based)
         r: fila del estudiante
-        n_columnas_total: total de columnas de área (para el modo simple sin config)
-        column_config: ColumnConfig (None = modo simple con todas las columnas)
+        n_areas: total de columnas de área de trabajo (para el modo simple sin config)
+        column_config: ColumnConfig (None = modo simple con todas las columnas).
+
+    Cada columna de la config se resuelve según su tipo: "ev" -> col_ev_start + pos,
+    "area" (o sin tipo) -> col_at1 + pos.
 
     Fórmulas generadas:
-        Sin config / simple:    =IFERROR(SUM(col1:colN)/n,"")
-        Pesos sin destino:      =IFERROR(SUMPRODUCT(col*pesos)/100,"")
-        Pesos con destino:      =IFERROR(SUMPRODUCT(col*pesos)/SUM(pesos),"")
+        Sin config / simple:    =IFERROR(SUM(col_at1:col_def-1)/n_areas,"")
+        Simple con seleccionadas: =IFERROR(AVERAGE(refs),"") (1 → IFERROR(ref,""))
+        Pesos:                  =IFERROR((ref*peso+...+ref*peso)/divisor,"")
     """
     from openpyxl.utils import get_column_letter as gcl
 
     if column_config is None:
-        # Modo legacy: simple con todas las columnas
+        # Modo legacy: simple con todas las columnas de área
         at1_ref = f"{gcl(col_at1)}{r}"
-        atn_ref = f"{gcl(col_def_menos1)}{r}"
-        return f"=IFERROR(SUM({at1_ref}:{atn_ref})/{n_columnas_total},\"\")"
+        atn_ref = f"{gcl(col_at1 + n_areas - 1)}{r}"
+        return f"=IFERROR(SUM({at1_ref}:{atn_ref})/{n_areas},\"\")"
 
+    columnas = column_config.columnas
     seleccionadas = column_config.columnas_seleccionadas
     if not seleccionadas:
         return ""
 
     if not column_config.es_pesado():
         # Promedio simple de columnas seleccionadas
-        refs = [f"{gcl(col_at1 + k)}{r}" for k in seleccionadas]
-        n = len(refs)
-        if n == 1:
+        refs = [_ref_columna(col_ev_start, col_at1, r, i, columnas[i]) for i in seleccionadas]
+        if len(refs) == 1:
             return f"=IFERROR({refs[0]},\"\")"
         return f"=IFERROR(AVERAGE({','.join(refs)}),\"\")"
 
@@ -136,25 +183,24 @@ def _formula_definitiva(col_at1, col_def_menos1, r, n_columnas_total,
         return ""
     if n == 1:
         # Un solo factor: se usa directamente (peso irrelevante)
-        ref = f"{gcl(col_at1 + seleccionadas[0])}{r}"
+        ref = _ref_columna(col_ev_start, col_at1, r, seleccionadas[0], columnas[seleccionadas[0]])
         return f"=IFERROR({ref},\"\")"
-
-    # SUMPRODUCT(col * pesos_vector) / divisor
-    col_refs = [gcl(col_at1 + k) for k in seleccionadas]
-    peso_vals = [str(pesos[k]) for k in seleccionadas]
 
     # Construir la fórmula con una referencia de columna por cada peso
     # para que el recálculo automático funcione.
     partes = []
-    for col_ref, peso_val in zip(col_refs, peso_vals):
-        partes.append(f"{col_ref}{r}*{peso_val}")
+    for i in seleccionadas:
+        letra = _ref_columna(col_ev_start, col_at1, r, i, columnas[i])
+
+        # el "letra" ya incluye la fila (ej. "E11"); el peso va multiplicando.
+        partes.append(f"{letra}*{pesos[i]}")
 
     numerador = "+".join(partes)
 
     if column_config.pesos_suman_cien():
         divisor = "100"
     else:
-        pesos_suma = "+".join(peso_vals)
+        pesos_suma = "+".join(str(pesos[i]) for i in seleccionadas)
         divisor = f"({pesos_suma})"
 
     return f"=IFERROR(({numerador})/{divisor},\"\")"
@@ -307,7 +353,7 @@ def _escribir_hoja(ws, planilla: dict, column_config=None):
         cdef = ws.cell(row=r, column=col_def)
         if at and len(at) >= 1:
             cdef.value = _formula_definitiva(
-                col_at1, col_def - 1, r, n_areas, column_config
+                col_ev_start, col_at1, r, n_areas, column_config
             )
         cdef.border = border; cdef.alignment = center
         cdef.font = bold

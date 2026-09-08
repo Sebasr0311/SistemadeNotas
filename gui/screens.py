@@ -720,19 +720,37 @@ class App(ctk.CTk):
         self._chk_col = {}         # forma -> {índice: BooleanVar}
         self._chk_col_frames = {}  # forma -> frame del formulario
         self._peso_col = {}        # forma -> {índice: StringVar}
-        self._col_rows = {}        # forma -> {índice: frame de fila}
+        self._peso_entry = {}      # forma -> {índice: CTkEntry de peso}
         self._label_pesos = {}     # forma -> CTkLabel de resumen de pesos
+        self._planillas_forma = {} # forma -> planillas de esa forma (muestra)
 
-        # Asegurar una config por defecto para cada forma.
+        # Asegurar una config por defecto para cada forma. La cantidad de
+        # columnas "Def. Periodo" = periodo de la primera planilla de la forma
+        # menos 1 (campo ev_anteriores). Límite sanitizador: si ev+áreas
+        # superan 16 columnas candidatas, se recortan las áreas excedentes
+        # para no romper la tabla de la UI.
+        MAX_COLUMNAS_CANDIDATAS = 16
         for clave_forma in orden_formas:
             n = clave_forma[1]
             if clave_forma not in self._column_configs:
-                self._column_configs[clave_forma] = ColumnConfig.crear_desde_planilla(n)
+                planillas_forma = por_forma[clave_forma]
+                periodo_forma = 0
+                if planillas_forma:
+                    periodo_raw = (planillas_forma[0].get("encabezado") or {}).get("periodo")
+                    if (isinstance(periodo_raw, int) and not isinstance(periodo_raw, bool)
+                            and 1 <= periodo_raw <= 4):
+                        periodo_forma = periodo_raw
+                n_ev = periodo_forma - 1 if periodo_forma > 0 else 0
+                config_defecto = ColumnConfig.crear_desde_planilla(n, n_ev)
+                if len(config_defecto.columnas) > MAX_COLUMNAS_CANDIDATAS:
+                    config_defecto.columnas = config_defecto.columnas[:MAX_COLUMNAS_CANDIDATAS]
+                self._column_configs[clave_forma] = config_defecto
 
         # Para cada forma: un CTkFrame con dos columnas (formulario + imagen).
         for i, clave_forma in enumerate(orden_formas, start=1):
             n = clave_forma[1]
             planillas_forma = por_forma[clave_forma]
+            self._planillas_forma[clave_forma] = planillas_forma
 
             frame_forma = ctk.CTkFrame(
                 interior, fg_color=styles.COLOR_BLANCO, corner_radius=12,
@@ -889,6 +907,10 @@ class App(ctk.CTk):
         ventana.title("Planilla completa")
         ventana.geometry("880x680")
         ventana.minsize(500, 400)
+        # Referencia persistente: si la ventana queda solo en una variable local,
+        # el garbage collector puede destruirla cuando termina este método
+        # (síntoma: aparece medio segundo y se cierra sola).
+        self._ventana_planilla = ventana
 
         ancho, alto = imagen.size
         # Para el Canvas se usa un PhotoImage de PIL (CTkImage sirve para los
@@ -926,7 +948,19 @@ class App(ctk.CTk):
 
     def _reconstruir_formulario_columnas(self, clave_forma, n_areas):
         """Reconstruye el formulario de columnas de UNA forma según el modo
-        elegido para esa forma. Los estados de widgets son POR FORMA."""
+        elegido, como una tabla recreada de la planilla (mini-Excel):
+
+        - Fila 0 (selección): un checkbox por cada columna candidata
+          ("Def. Periodo 1..N" y "Área Trabajo 1..M"); en modo pesos, un campo
+          de porcentaje debajo de cada checkbox.
+        - Fila 1 (cabecera): "No.", "Nombre", el nombre de cada candidata y
+          "Definitiva" en gris (no seleccionable: se calcula).
+        - Filas 2..~10: los primeros estudiantes con sus valores.
+
+        La "Definitiva" se muestra pero nunca se marca. Los estados de widgets
+        son POR FORMA. Las columnas candidatas salen de la columnas de la
+        config (que ya llevan `tipo` y `pos`).
+        """
         frame_col = self._chk_col_frames[clave_forma]
         for w in frame_col.winfo_children():
             w.destroy()
@@ -935,9 +969,15 @@ class App(ctk.CTk):
         modo = self._var_modo[clave_forma].get()
         self._chk_col[clave_forma] = {}   # índice -> BooleanVar
         self._peso_col[clave_forma] = {}  # índice -> StringVar
-        self._col_rows[clave_forma] = {}  # índice -> frame de fila
+        self._peso_entry[clave_forma] = {}  # índice -> CTkEntry de peso
 
-        if not config.columnas:
+        # Límite sanitizador: la tabla no muestra más de 16 columnas
+        # candidatas (ev + áreas). Si se supera, se recortan las áreas
+        # excedentes para no romper la UI.
+        MAX_CANDIDATAS = 16
+        columnas = list(config.columnas)[:MAX_CANDIDATAS]
+
+        if not columnas:
             ctk.CTkLabel(
                 frame_col,
                 text="No se detectaron columnas de notas en esta planilla.",
@@ -945,51 +985,98 @@ class App(ctk.CTk):
             ).pack(pady=12)
             return
 
-        # Cabecera
-        cabecera = ctk.CTkFrame(frame_col, fg_color="#EDF2FB", corner_radius=8)
-        cabecera.pack(fill="x", pady=(2, 4))
-        ctk.CTkLabel(cabecera, text="Incluir", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
-                     text_color=styles.COLOR_TEXTO, width=60).pack(side="left", padx=(10, 4), pady=5)
-        ctk.CTkLabel(cabecera, text="Columna de notas", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
-                     text_color=styles.COLOR_TEXTO, width=190, anchor="w").pack(side="left", pady=5)
-        if modo == "pesos":
-            ctk.CTkLabel(cabecera, text="Porcentaje (%)", font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
-                         text_color=styles.COLOR_TEXTO, width=110).pack(side="left", pady=5)
+        n_cand = len(columnas)
+        planillas_forma = self._planillas_forma.get(clave_forma, [])
+        muestra = []
+        if planillas_forma:
+            muestra = (planillas_forma[0].get("estudiantes") or [])[:10]
 
-        for i, col in enumerate(config.columnas):
-            fila = ctk.CTkFrame(frame_col, fg_color="transparent")
-            fila.pack(fill="x", pady=2)
-            self._col_rows[clave_forma][i] = fila
+        ancho_no = 38
+        ancho_nombre = 150
+        ancho_cand = 58
+        ancho_def = 76
 
+        # Tabla con scroll horizontal interno para cuando hay muchas columnas.
+        tabla = ctk.CTkScrollableFrame(
+            frame_col, orientation="horizontal", height=300,
+            fg_color=styles.COLOR_BLANCO, corner_radius=8,
+            border_width=1, border_color="#E3E9F5",
+        )
+        tabla.pack(fill="both", expand=True, pady=(2, 2))
+        for g in range(2 + n_cand + 1):
+            if g == 0:
+                ancho = ancho_no
+            elif g == 1:
+                ancho = ancho_nombre
+            elif g == 2 + n_cand:
+                ancho = ancho_def
+            else:
+                ancho = ancho_cand
+            tabla.grid_columnconfigure(g, minsize=ancho)
+
+        fuentes_cab = (styles.FUENTE, 10, "bold")
+        fuentes_celda = (styles.FUENTE, 10)
+
+        # ── Fila 0: selección (checkbox y, en pesos, el porcentaje) ──
+        for ci, col in enumerate(columnas):
+            g = 2 + ci
+            celda = ctk.CTkFrame(tabla, fg_color="transparent")
+            celda.grid(row=0, column=g, padx=2, pady=(3, 0))
             var_chk = tk.BooleanVar(value=col.get("incluida", True))
-            self._chk_col[clave_forma][i] = var_chk
+            self._chk_col[clave_forma][ci] = var_chk
             ctk.CTkCheckBox(
-                fila, text="", variable=var_chk, width=50,
-                command=lambda f=clave_forma, idx=i: self._on_toggle_col(f, idx),
-                checkbox_width=22, checkbox_height=22,
-            ).pack(side="left", padx=(10, 4))
-
-            nombre = col.get("nombre") or f"Área Trabajo {i+1}"
-            ctk.CTkLabel(
-                fila, text=nombre, font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
-                text_color=styles.COLOR_TEXTO, width=185, anchor="w",
-            ).pack(side="left")
-
+                celda, text="", variable=var_chk, width=24,
+                command=lambda f=clave_forma, idx=ci: self._on_toggle_col(f, idx),
+                checkbox_width=18, checkbox_height=18,
+            ).pack(anchor="center", pady=(0, 1))
             if modo == "pesos":
                 var_peso = tk.StringVar(value=_fmt_peso(col.get("peso")))
-                self._peso_col[clave_forma][i] = var_peso
+                self._peso_col[clave_forma][ci] = var_peso
                 entrada = ctk.CTkEntry(
-                    fila, textvariable=var_peso, width=100, height=28,
-                    font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
-                    fg_color=styles.COLOR_FONDO_SECUNDARIO,
+                    celda, textvariable=var_peso, width=ancho_cand - 12, height=22,
+                    font=(styles.FUENTE, 9), fg_color=styles.COLOR_FONDO_SECUNDARIO,
                     border_color="#D5DEEF",
                 )
-                entrada.pack(side="left", padx=(10, 0))
-                estado = "normal" if col.get("incluida", True) else "disabled"
-                entrada.configure(state=estado)
-            else:
-                # En simple no se muestran pesos
-                ctk.CTkLabel(fila, text="", width=110).pack(side="left")
+                entrada.pack(anchor="center", pady=(0, 2))
+                entrada.configure(
+                    state="normal" if col.get("incluida", True) else "disabled"
+                )
+                self._peso_entry[clave_forma][ci] = entrada
+
+        # ── Fila 1: cabecera ──
+        ctk.CTkLabel(tabla, text="No.", font=fuentes_cab, text_color=styles.COLOR_TEXTO,
+                     anchor="center", width=ancho_no,
+                     ).grid(row=1, column=0, sticky="nsew", padx=1, pady=1)
+        ctk.CTkLabel(tabla, text="Nombre", font=fuentes_cab, text_color=styles.COLOR_TEXTO,
+                     anchor="w", width=ancho_nombre,
+                     ).grid(row=1, column=1, sticky="nsew", padx=1, pady=1)
+        for ci, col in enumerate(columnas):
+            g = 2 + ci
+            ctk.CTkLabel(tabla, text=col.get("nombre") or f"Columna {ci+1}", font=fuentes_cab,
+                         text_color=styles.COLOR_TEXTO, anchor="center", width=ancho_cand,
+                         ).grid(row=1, column=g, sticky="nsew", padx=1, pady=1)
+        ctk.CTkLabel(tabla, text="Definitiva", font=fuentes_cab,
+                     text_color=styles.COLOR_TEXTO_SECUNDARIO, anchor="center", width=ancho_def,
+                     ).grid(row=1, column=2 + n_cand, sticky="nsew", padx=1, pady=1)
+
+        # ── Filas 2..~10: los primeros estudiantes con sus valores ──
+        for rid, est in enumerate(muestra):
+            fila_ui = 2 + rid
+            ctk.CTkLabel(tabla, text=str(est.get("no") or ""), font=fuentes_celda,
+                         text_color=styles.COLOR_TEXTO, anchor="center", width=ancho_no,
+                         ).grid(row=fila_ui, column=0, sticky="nsew", padx=1, pady=0)
+            ctk.CTkLabel(tabla, text=est.get("nombre") or "", font=fuentes_celda,
+                         text_color=styles.COLOR_TEXTO, anchor="w", width=ancho_nombre,
+                         ).grid(row=fila_ui, column=1, sticky="nsew", padx=1, pady=0)
+            for ci, col in enumerate(columnas):
+                g = 2 + ci
+                valor = _valor_candidata(est, col, ci)
+                ctk.CTkLabel(tabla, text=_fmt_celda(valor), font=fuentes_celda,
+                             text_color=styles.COLOR_TEXTO, anchor="center", width=ancho_cand,
+                             ).grid(row=fila_ui, column=g, sticky="nsew", padx=1, pady=0)
+            # La "Definitiva" no se calcula en la vista: celda vacía.
+            ctk.CTkLabel(tabla, text="", width=ancho_def,
+                         ).grid(row=fila_ui, column=2 + n_cand, padx=1)
 
         self._actualizar_resumen_pesos(clave_forma)
 
@@ -1000,14 +1087,10 @@ class App(ctk.CTk):
 
     def _on_toggle_col(self, clave_forma, idx):
         """Habilita/deshabilita el campo de peso cuando se marca una columna."""
-        if idx in self._peso_col[clave_forma] and idx in self._col_rows[clave_forma]:
-            # Buscar la entrada dentro de la fila (es el único CTkEntry)
-            fila = self._col_rows[clave_forma][idx]
-            for w in fila.winfo_children():
-                if isinstance(w, ctk.CTkEntry):
-                    w.configure(
-                        state="normal" if self._chk_col[clave_forma][idx].get() else "disabled"
-                    )
+        if idx in self._peso_col[clave_forma] and idx in self._peso_entry[clave_forma]:
+            self._peso_entry[clave_forma][idx].configure(
+                state="normal" if self._chk_col[clave_forma][idx].get() else "disabled"
+            )
         self._actualizar_resumen_pesos(clave_forma)
 
     def _actualizar_resumen_pesos(self, clave_forma):
@@ -1070,13 +1153,11 @@ class App(ctk.CTk):
             chk = self._chk_col[clave_forma]
             peso = self._peso_col[clave_forma]
 
+            # Reconstruir la lista de columnas desde la config original,
+            # conservando SIEMPRE su `tipo` y `pos` (nunca se reescriben desde
+            # el nombre); el checkbox y el peso se leen de la UI.
             columnas = []
-            for i in range(n_areas):
-                col_original = (
-                    config_original.columnas[i]
-                    if i < len(config_original.columnas)
-                    else {}
-                )
+            for i, col_original in enumerate(config_original.columnas):
                 incl = chk[i].get() if i in chk else col_original.get("incluida", True)
                 valor_peso = col_original.get("peso", 0)
                 if i in peso:
@@ -1087,14 +1168,19 @@ class App(ctk.CTk):
                         except ValueError:
                             messagebox.showerror(
                                 "Porcentaje inválido",
-                                f"El porcentaje de la columna \"{col_original.get('nombre', f'Área Trabajo {i+1}')}\" "
+                                f"El porcentaje de la columna \"{col_original.get('nombre', f'Columna {i+1}')}\" "
                                 "no es un número válido. Usá punto o coma para decimales (ej. 33.3).",
                             )
                             return False
                 columnas.append({
-                    "nombre": col_original.get("nombre") or f"Área Trabajo {i+1}",
+                    "nombre": col_original.get("nombre") or f"Columna {i+1}",
                     "incluida": bool(incl),
                     "peso": valor_peso,
+                    # Conservar el tipo y la posición dentro de su tipo tal como
+                    # venían (ev o área): la fórmula los necesita para mapear a
+                    # la columna física del Excel.
+                    "tipo": col_original.get("tipo"),
+                    "pos": col_original.get("pos"),
                 })
 
             config_nueva = ColumnConfig(modo=modo, columnas=columnas)
@@ -1336,6 +1422,29 @@ def _fmt_celda(valor):
     if isinstance(valor, float) and valor.is_integer():
         return str(int(valor))
     return str(valor)
+
+
+def _valor_candidata(estudiante, col, indice):
+    """Valor de un estudiante para una columna candidata de la tabla.
+
+    Según el tipo de la columna:
+    - "ev"   -> ev_anteriores[pos]
+    - "area" (o sin tipo, retrocompat) -> area_trabajo[pos]; si falta `pos`,
+      se usa el índice en la lista (config histórica de solo áreas).
+    """
+    tipo = col.get("tipo")
+    pos = col.get("pos")
+    if tipo == "ev":
+        if pos is None:
+            return None
+        ev = estudiante.get("ev_anteriores") or []
+        return ev[pos] if 0 <= pos < len(ev) else None
+    if pos is None:
+        pos = indice
+    if estudiante.get("retirado"):
+        return None
+    at = estudiante.get("area_trabajo") or []
+    return at[pos] if 0 <= pos < len(at) else None
 
 
 def _parse_celda(texto):
