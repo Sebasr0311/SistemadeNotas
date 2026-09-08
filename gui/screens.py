@@ -386,6 +386,10 @@ class App(ctk.CTk):
                         self._barra.set(msg["valor"])
                 elif msg["tipo"] == MSG_RESULTADO:
                     self.planillas = msg["planillas"]
+                    # Remesa nueva: descartar configs per-planilla de la remesa
+                    # anterior (si no, un índice reutilizado arrastra una config
+                    # vieja con columnas marcadas/desmarcadas de otro PDF).
+                    self._column_configs = {}
                     self.paginas_total = msg.get("paginas_total", len(msg["planillas"]))
                     self.paginas_fallidas = msg.get("fallidas", [])
                     self.planilla_actual_idx = 0
@@ -775,7 +779,7 @@ class App(ctk.CTk):
             fg_color="transparent", text_color=styles.COLOR_TEXTO_SECUNDARIO,
             border_width=1, border_color="#C6D2E8",
             hover_color=styles.COLOR_FONDO_SECUNDARIO,
-            command=self.mostrar_revision,
+            command=self._salir_configuracion,
         ).pack(side="left", padx=8)
 
         ctk.CTkButton(
@@ -812,6 +816,15 @@ class App(ctk.CTk):
             return
         self._idx_actual = nuevo
         self._reconstruir_tarjeta(nuevo)
+
+    def _salir_configuracion(self):
+        """Guarda la config de la planilla visible (widgets vivos) y vuelve a
+        la revisión. Sin esto, los cambios de la planilla actual se perdían al
+        salir sin cambiar de planilla ni generar."""
+        idx = self._idx_actual
+        if idx in self._var_modo:
+            self._column_configs[idx] = self._leer_config_desde_ui(idx)
+        self.mostrar_revision()
 
     def _leer_config_desde_ui(self, idx):
         """Reconstruye la ColumnConfig de la planilla idx desde sus widgets
@@ -1246,7 +1259,14 @@ class App(ctk.CTk):
         self._actualizar_resumen_pesos(idx)
 
     def _on_modo_changed(self, idx):
-        """Reconstruye el formulario de UNA planilla cuando cambia simple ↔ pesos."""
+        """Reconstruye el formulario de UNA planilla cuando cambia simple ↔ pesos.
+
+        Antes de reconstruir se guarda la config actual desde los widgets vivos:
+        si la usuaria desmarcó columnas y después alterna el modo, el cambio
+        quedaba perdido porque el formulario se reconstruía desde la config
+        guardada de antes."""
+        if idx in self._var_modo:
+            self._column_configs[idx] = self._leer_config_desde_ui(idx)
         planilla = self.planillas[idx]
         enc = planilla.get("encabezado") or {}
         n = generar_excel_notas.calcular_n_areas(enc, planilla.get("estudiantes") or [])
