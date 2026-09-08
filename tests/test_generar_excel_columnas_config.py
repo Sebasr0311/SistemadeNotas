@@ -452,5 +452,220 @@ class TestExcelPorFormaConColumnConfigs(unittest.TestCase):
         self.assertNotIn("Modo de cálculo", valores4)
 
 
+def _planilla_con_otras(area_por_alumno, otras_por_alumno, n_area_trabajo=None,
+                        otras_columnas=None, periodo=3):
+    """Planilla con columnas "otras" (trabajo práctico, parcial, etc.).
+
+    Misma base que _planilla; `otras_columnas=None` omite la clave del
+    encabezado (como las planillas pre-cambio), [] la declara vacía.
+    """
+    encabezado = {
+        "institucion": "INSTITUCION DEMO",
+        "sede": "SEDE",
+        "año_lectivo": "2026",
+        "jornada": "MAÑANA",
+        "grupo": "0302",
+        "asignatura": "MATEMATICAS",
+        "docente": "DOCENTE DEMO",
+        "periodo": periodo,
+    }
+    if n_area_trabajo is not None:
+        encabezado["n_area_trabajo"] = n_area_trabajo
+    if otras_columnas is not None:
+        encabezado["otras_columnas"] = list(otras_columnas)
+
+    estudiantes = []
+    for i, notas in enumerate(area_por_alumno, start=1):
+        retirado = notas is None
+        otras = otras_por_alumno[i - 1] if otras_por_alumno else []
+        estudiantes.append({
+            "no": i,
+            "nombre": f"ALUMNO {i}",
+            "ev_anteriores": [45, 45] if periodo > 1 else [],
+            "area_trabajo": notas if not retirado else None,
+            "otras_notas": [] if retirado else list(otras),
+            "retirado": retirado,
+            "revisar": [False] * (len(notas) if not retirado else 0),
+            "revisar_otras": [False] * (len(otras) if not retirado else 0),
+        })
+    return {"encabezado": encabezado, "estudiantes": estudiantes}
+
+
+class TestColumnConfigOtras(unittest.TestCase):
+    """ColumnConfig.crear_desde_planilla con columnas "otras"."""
+
+    def test_crear_desde_planilla_con_otras(self):
+        # Periodo 3 (2 evs) + 2 áreas + 2 otras: orden ev -> área -> otras.
+        cfg = ColumnConfig.crear_desde_planilla(
+            2, n_ev=2, nombres_otras=["Parcial", "Trabajo Práctico"]
+        )
+        self.assertEqual(len(cfg.columnas), 6)
+        self.assertEqual(cfg.columnas[0]["nombre"], "Def. Periodo 1")
+        self.assertEqual(cfg.columnas[0]["tipo"], "ev")
+        self.assertEqual(cfg.columnas[2]["nombre"], "Área Trabajo 1")
+        self.assertEqual(cfg.columnas[2]["tipo"], "area")
+        self.assertEqual(cfg.columnas[4]["nombre"], "Parcial")
+        self.assertEqual(cfg.columnas[4]["tipo"], "otra")
+        self.assertEqual(cfg.columnas[4]["pos"], 0)
+        self.assertEqual(cfg.columnas[5]["nombre"], "Trabajo Práctico")
+        self.assertEqual(cfg.columnas[5]["tipo"], "otra")
+        self.assertEqual(cfg.columnas[5]["pos"], 1)
+        # Peso por defecto reparte 100 entre el total (6).
+        self.assertEqual(cfg.columnas[0]["peso"], round(100.0 / 6, 1))
+        self.assertTrue(all(c["incluida"] for c in cfg.columnas))
+        self.assertEqual(cfg.columnas_seleccionadas, [0, 1, 2, 3, 4, 5])
+
+    def test_sin_otras_conserva_firma_anterior(self):
+        # Llamada con 2 args (retrocompat): misma config que antes.
+        cfg = ColumnConfig.crear_desde_planilla(2, n_ev=2)
+        self.assertEqual(len(cfg.columnas), 4)
+        self.assertEqual([c["tipo"] for c in cfg.columnas],
+                         ["ev", "ev", "area", "area"])
+
+    def test_nombre_vacio_usa_generico(self):
+        cfg = ColumnConfig.crear_desde_planilla(2, n_ev=0,
+                                                nombres_otras=["  ", "Parcial"])
+        self.assertEqual(cfg.columnas[2]["nombre"], "Otras notas 1")
+        self.assertEqual(cfg.columnas[3]["nombre"], "Parcial")
+
+
+class TestFormulasConOtras(unittest.TestCase):
+    """_formula_definitiva con columnas "otras" y col_otras_start."""
+
+    def _cfg(self, seleccion, modo="simple"):
+        """[Def.P1, Def.P2, A1, A2, O1, O2] con pesos 25."""
+        columnas = []
+        for k in range(2):
+            columnas.append({"nombre": f"Def. Periodo {k+1}", "tipo": "ev",
+                             "pos": k, "incluida": f"D{k+1}" in seleccion, "peso": 25})
+        for k in range(2):
+            columnas.append({"nombre": f"Área Trabajo {k+1}", "tipo": "area",
+                             "pos": k, "incluida": f"A{k+1}" in seleccion, "peso": 25})
+        for k in range(2):
+            columnas.append({"nombre": ["Parcial", "Recuperatorio"][k], "tipo": "otra",
+                             "pos": k, "incluida": f"O{k+1}" in seleccion, "peso": 25})
+        return ColumnConfig(modo=modo, columnas=[
+            dict(c, incluida=bool(c["incluida"])) for c in columnas
+        ])
+
+    def _f(self, config, col_otras_start=8):
+        # Periodo 3 => ev en C(3),D(4); área arranca en E(5) (col_at1=5);
+        # "otras" arrancan en H(8); r=11.
+        return generador._formula_definitiva(3, 5, 11, 5, config, col_otras_start)
+
+    def test_simple_con_ev_area_y_otra(self):
+        # D2 -> D(4); A1 -> E(5); O2 -> H(8)+1 = I(9).
+        cfg = self._cfg({"D2", "A1", "O2"})
+        self.assertEqual(self._f(cfg), '=IFERROR(AVERAGE(D11,E11,I11),"")')
+
+    def test_pesos_mixto_con_otras(self):
+        cfg = self._cfg({"D1", "A2", "O1", "O2"}, modo="pesos")
+        # C (ev1), F (área2), H (otra1), I (otra2).
+        self.assertEqual(
+            self._f(cfg),
+            '=IFERROR((C11*25+F11*25+H11*25+I11*25)/100,"")',
+        )
+
+    def test_otra_sin_col_otras_start_lanza_valueerror(self):
+        cfg = self._cfg({"O1"})
+        with self.assertRaises(ValueError):
+            generador._formula_definitiva(3, 5, 11, 5, cfg, None)
+
+    def test_legacy_ignora_col_otras_start(self):
+        # Sin config el parámetro extra no cambia la fórmula histórica.
+        self.assertEqual(
+            generador._formula_definitiva(3, 5, 11, 5, None, 8),
+            '=IFERROR(SUM(E11:I11)/5,"")',
+        )
+
+
+class TestExcelEndToEndConOtras(unittest.TestCase):
+    """El Excel final incluye la zona de columnas "otras" y sus fórmulas."""
+
+    def test_periodo_3_con_otras(self):
+        # Periodo 3 => ev en C,D; 2 áreas E,F; otras G,H; definitiva en I(9).
+        # El alumno 1 trae una sola nota "otra" pero el encabezado declara 2:
+        # la zona queda de 2 columnas (la segunda celda en blanco).
+        planilla = _planilla_con_otras(
+            [[40, 50], [41, 51]],
+            [[42], [38, 40]],
+            n_area_trabajo=2,
+            otras_columnas=["Parcial", "Trabajo Práctico"],
+        )
+        cfg = ColumnConfig.crear_desde_planilla(
+            2, n_ev=2, nombres_otras=["Parcial", "Trabajo Práctico"]
+        )
+        ws = _hoja_cargada(planilla, cfg)
+        hr = _fila_header(ws)
+        fila1 = hr + 1
+        # Títulos: G = Parcial, H = Trabajo Práctico, I = Definitiva.
+        self.assertEqual(ws.cell(row=hr, column=7).value, "Parcial")
+        self.assertEqual(ws.cell(row=hr, column=8).value, "Trabajo Práctico")
+        self.assertEqual(ws.cell(row=hr, column=9).value, "Definitiva Periodo 3")
+        # Valores: G=42, H en blanco (None) por el padding declarado.
+        self.assertEqual(ws.cell(row=fila1, column=7).value, 42)
+        self.assertIsNone(ws.cell(row=fila1, column=8).value)
+        # Simple con todas (ev+áreas+otras): AVERAGE de C,D,E,F,G,H.
+        self.assertEqual(
+            ws.cell(row=fila1, column=9).value,
+            f'=IFERROR(AVERAGE(C{fila1},D{fila1},E{fila1},F{fila1},G{fila1},H{fila1}),"")',
+        )
+
+    def test_periodo_4_con_otras_y_anual(self):
+        # Periodo 4 => 3 evs C,D,E; 2 áreas F,G; 2 otras H,I; def J(10); anual K(11).
+        planilla = _planilla_con_otras(
+            [[40, 50], [41, 51]],
+            [[42, 48], [38, 40]],
+            n_area_trabajo=2,
+            otras_columnas=["Parcial", "Definitiva 1"],
+            periodo=4,
+        )
+        cfg = ColumnConfig(columnas=[
+            {"nombre": "Def. Periodo 3", "tipo": "ev", "pos": 2, "incluida": True, "peso": 25},
+            {"nombre": "Área Trabajo 2", "tipo": "area", "pos": 1, "incluida": True, "peso": 25},
+            {"nombre": "Parcial", "tipo": "otra", "pos": 0, "incluida": True, "peso": 25},
+            {"nombre": "Definitiva 1", "tipo": "otra", "pos": 1, "incluida": True, "peso": 25},
+        ])
+        ws = _hoja_cargada(planilla, cfg)
+        hr = _fila_header(ws)
+        fila1 = hr + 1
+        # Títulos: H = Parcial, I = Definitiva 1, J = Definitiva Periodo 4, K = Anual.
+        self.assertEqual(ws.cell(row=hr, column=8).value, "Parcial")
+        self.assertEqual(ws.cell(row=hr, column=9).value, "Definitiva 1")
+        self.assertEqual(ws.cell(row=hr, column=10).value, "Definitiva Periodo 4")
+        self.assertEqual(ws.cell(row=hr, column=11).value, "Definitiva Anual")
+        # Simple con la selección mixta: E (ev3), G (área2), H, I.
+        self.assertEqual(
+            ws.cell(row=fila1, column=10).value,
+            f'=IFERROR(AVERAGE(E{fila1},G{fila1},H{fila1},I{fila1}),"")',
+        )
+        # Anual: promedio de las 3 evs + la definitiva del periodo.
+        self.assertEqual(
+            ws.cell(row=fila1, column=11).value,
+            f'=IFERROR(AVERAGE(C{fila1},D{fila1},E{fila1},J{fila1}),"")',
+        )
+        # Valor de una celda "otra" escrita.
+        self.assertEqual(ws.cell(row=fila1, column=8).value, 42)
+
+    def test_sin_titulos_usa_nombres_genericos_y_legacy(self):
+        # Sin la clave "otras_columnas" (planillas pre-cambio) pero con valores:
+        # títulos genéricos "Otras notas 1..N"; sin config -> fórmula legacy de
+        # áreas (las otras se escriben pero no entran al cálculo).
+        planilla = _planilla_con_otras(
+            [[40, 50], [41, 51]],
+            [[42], [38]],
+            n_area_trabajo=2,
+            otras_columnas=None,
+        )
+        ws = _hoja_cargada(planilla, None)
+        hr = _fila_header(ws)
+        fila1 = hr + 1
+        # ev C,D; áreas E,F; otras G; def H(8). Legacy: SUM(E:F)/2.
+        self.assertEqual(ws.cell(row=hr, column=7).value, "Otras notas 1")
+        self.assertEqual(ws.cell(row=fila1, column=7).value, 42)
+        self.assertEqual(ws.cell(row=fila1, column=8).value,
+                         f'=IFERROR(SUM(E{fila1}:F{fila1})/2,"")')
+
+
 if __name__ == "__main__":
     unittest.main()

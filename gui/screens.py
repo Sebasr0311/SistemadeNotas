@@ -723,11 +723,17 @@ class App(ctk.CTk):
         self._peso_entry = {}      # forma -> {índice: CTkEntry de peso}
         self._label_pesos = {}     # forma -> CTkLabel de resumen de pesos
         self._planillas_forma = {} # forma -> planillas de esa forma (muestra)
+        # Navegador de imágenes: índice de la planilla mostrada por forma y
+        # columna derecha donde se redibuja (si la forma tiene varias planillas).
+        self._idx_imagen_forma = {}  # forma -> int
+        self._col_der_imagen = {}    # forma -> CTkFrame
+        self._orden_formas = orden_formas
+        self._dpi_imagen = dpi
 
         # Asegurar una config por defecto para cada forma. La cantidad de
         # columnas "Def. Periodo" = periodo de la primera planilla de la forma
-        # menos 1 (campo ev_anteriores). Límite sanitizador: si ev+áreas
-        # superan 16 columnas candidatas, se recortan las áreas excedentes
+        # menos 1 (campo ev_anteriores). Límite sanitizador: si ev+áreas+otras
+        # superan 16 columnas candidatas, se recortan las últimas (las "otras")
         # para no romper la tabla de la UI.
         MAX_COLUMNAS_CANDIDATAS = 16
         for clave_forma in orden_formas:
@@ -741,7 +747,12 @@ class App(ctk.CTk):
                             and 1 <= periodo_raw <= 4):
                         periodo_forma = periodo_raw
                 n_ev = periodo_forma - 1 if periodo_forma > 0 else 0
-                config_defecto = ColumnConfig.crear_desde_planilla(n, n_ev)
+                # Columnas "otras" declaradas por el extractor (trabajo
+                # práctico, parcial, recuperatorio, etc.): la usuaria decide
+                # después cuáles entran a la definitiva.
+                enc_forma = planillas_forma[0].get("encabezado") or {}
+                nombres_otras = enc_forma.get("otras_columnas") or []
+                config_defecto = ColumnConfig.crear_desde_planilla(n, n_ev, nombres_otras)
                 if len(config_defecto.columnas) > MAX_COLUMNAS_CANDIDATAS:
                     config_defecto.columnas = config_defecto.columnas[:MAX_COLUMNAS_CANDIDATAS]
                 self._column_configs[clave_forma] = config_defecto
@@ -811,6 +822,12 @@ class App(ctk.CTk):
             # ── Imagen de la planilla (primera de la forma), clickeable ──
             primera = planillas_forma[0]
             self._render_imagen_forma(col_der, primera, i, dpi)
+            if len(planillas_forma) > 1:
+                # Varias planillas en la misma forma: navegador para recorrerlas
+                # sin salir de la configuración (la imagen es por planilla).
+                self._idx_imagen_forma[clave_forma] = 0
+                self._col_der_imagen[clave_forma] = col_der
+                self._render_navegador_forma(clave_forma, col_der, len(planillas_forma))
 
             self._reconstruir_formulario_columnas(clave_forma, n)
 
@@ -891,6 +908,65 @@ class App(ctk.CTk):
             font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
             text_color=styles.COLOR_TEXTO_SECUNDARIO,
         ).pack(pady=(0, 4))
+
+    def _render_navegador_forma(self, clave_forma, contenedor_der, total):
+        """Navegador "‹ Planilla X de N ›" debajo de la imagen de la forma.
+
+        Solo se crea cuando la forma agrupa más de una planilla (misma
+        cantidad de columnas). Cada clic en ‹/› redibuja la imagen con la
+        planilla anterior/siguiente (con vuelta al final del recorrido).
+        """
+        fila = ctk.CTkFrame(contenedor_der, fg_color="transparent")
+        fila.pack(pady=(0, 4))
+        ctk.CTkButton(
+            fila, text="‹", width=30, height=26,
+            font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
+            fg_color=styles.COLOR_PRINCIPAL, hover_color=styles.COLOR_PRINCIPAL_HOVER,
+            command=lambda f=clave_forma: self._navegar_imagen_forma(f, -1),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(
+            fila,
+            text=f"Planilla {self._idx_imagen_forma.get(clave_forma, 0) + 1} de {total}",
+            font=(styles.FUENTE, styles.TAM_TEXTO_CHICO),
+            text_color=styles.COLOR_TEXTO_SECUNDARIO, width=110,
+        ).pack(side="left")
+        ctk.CTkButton(
+            fila, text="›", width=30, height=26,
+            font=(styles.FUENTE, styles.TAM_TEXTO_CHICO, "bold"),
+            fg_color=styles.COLOR_PRINCIPAL, hover_color=styles.COLOR_PRINCIPAL_HOVER,
+            command=lambda f=clave_forma: self._navegar_imagen_forma(f, +1),
+        ).pack(side="left", padx=(6, 0))
+
+    def _render_imagen_forma_idx(self, clave_forma, i_idx_planilla):
+        """Redibuja la imagen de la forma mostrando la planilla i_idx_planilla.
+
+        Destruye la columna derecha actual (imagen + navegador) y la vuelve a
+        renderizar con la planilla pedida; conserva el estado de la
+        configuración (el formulario vive en la columna izquierda).
+        """
+        total = len(self._planillas_forma.get(clave_forma, []))
+        if total == 0:
+            return
+        i_idx_planilla %= total
+        self._idx_imagen_forma[clave_forma] = i_idx_planilla
+        contenedor = self._col_der_imagen.get(clave_forma)
+        if contenedor is None:
+            return
+        for w in contenedor.winfo_children():
+            w.destroy()
+        planilla = self._planillas_forma[clave_forma][i_idx_planilla]
+        indice_forma = self._orden_formas.index(clave_forma) + 1
+        self._render_imagen_forma(contenedor, planilla, indice_forma, self._dpi_imagen)
+        if total > 1:
+            self._render_navegador_forma(clave_forma, contenedor, total)
+
+    def _navegar_imagen_forma(self, clave_forma, delta):
+        """Mueve la imagen de la forma ±1 planilla (con vuelta al final)."""
+        total = len(self._planillas_forma.get(clave_forma, []))
+        if total <= 1:
+            return
+        actual = self._idx_imagen_forma.get(clave_forma, 0)
+        self._render_imagen_forma_idx(clave_forma, (actual + delta) % total)
 
     def _ver_planilla_grande(self, planilla):
         """Muestra la planilla completa como OVERLAY encima de esta ventana,
@@ -1051,8 +1127,8 @@ class App(ctk.CTk):
         self._peso_entry[clave_forma] = {}  # índice -> CTkEntry de peso
 
         # Límite sanitizador: la tabla no muestra más de 16 columnas
-        # candidatas (ev + áreas). Si se supera, se recortan las áreas
-        # excedentes para no romper la UI.
+        # candidatas (ev + áreas + otras). Si se supera, se recortan las
+        # últimas (las "otras") para no romper la UI.
         MAX_CANDIDATAS = 16
         columnas = list(config.columnas)[:MAX_CANDIDATAS]
 
@@ -1514,6 +1590,8 @@ def _valor_candidata(estudiante, col, indice):
 
     Según el tipo de la columna:
     - "ev"   -> ev_anteriores[pos]
+    - "otra" -> otras_notas[pos] (trabajo práctico, parcial, recuperatorio...);
+      si falta `pos`, se usa el índice en la lista.
     - "area" (o sin tipo, retrocompat) -> area_trabajo[pos]; si falta `pos`,
       se usa el índice en la lista (config histórica de solo áreas).
     """
@@ -1524,6 +1602,13 @@ def _valor_candidata(estudiante, col, indice):
             return None
         ev = estudiante.get("ev_anteriores") or []
         return ev[pos] if 0 <= pos < len(ev) else None
+    if tipo == "otra":
+        if pos is None:
+            pos = indice
+        if estudiante.get("retirado"):
+            return None
+        otr = estudiante.get("otras_notas") or []
+        return otr[pos] if 0 <= pos < len(otr) else None
     if pos is None:
         pos = indice
     if estudiante.get("retirado"):

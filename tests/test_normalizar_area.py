@@ -328,5 +328,142 @@ class TestNAreaTrabajoEncabezado(unittest.TestCase):
         }
 
 
+# ---------------------------------------------------------------------- #
+# Columnas "otras" (trabajo práctico, parcial, recuperatorio, etc.):
+# saneo de títulos, alineación de valores y flags, y consistencia
+# ---------------------------------------------------------------------- #
+
+class TestNormalizarOtrasEnPlanilla(unittest.TestCase):
+    """_normalizar_planilla con otras_columnas/otras_notas/revisar_otras."""
+
+    def _planilla_cruda(self, otras_columnas, otras_por_alumno, n=10):
+        """n alumnos no retirados (dentro del rango sano) con 2 áreas c/u.
+
+        `otras_por_alumno=None` omite la clave en cada estudiante (modelo sin
+        columnas otras); si es una lista, define las notas por alumno.
+        """
+        encabezado = {
+            "institucion": "I", "sede": "S", "año_lectivo": "2026",
+            "jornada": "M", "grupo": "0302", "asignatura": "A",
+            "docente": "D", "periodo": 3, "n_area_trabajo": 2,
+            "otras_columnas": list(otras_columnas),
+        }
+        estudiantes = []
+        for i in range(1, n + 1):
+            est = {
+                "no": i, "nombre": f"ALUMNO {i}",
+                "ev_anteriores": [45, 45],
+                "area_trabajo": [40, 50], "retirado": False,
+                "revisar": [False, False],
+            }
+            if otras_por_alumno is not None:
+                est["otras_notas"] = list(otras_por_alumno[i - 1])
+            estudiantes.append(est)
+        return {"encabezado": encabezado, "estudiantes": estudiantes}
+
+    def test_sanea_titulos_y_conserva_orden(self):
+        # Títulos: strip, sin vacíos, sin duplicados, en orden de izquierda a derecha.
+        p = gem._normalizar_planilla(self._planilla_cruda(
+            ["  Parcial ", "", "Parcial", " Trabajo Práctico ", None], [[42]] * 10
+        ))
+        self.assertEqual(p["encabezado"]["otras_columnas"],
+                         ["Parcial", "Trabajo Práctico"])
+        # La inconsistencia (1 valor declarado vs. 2 títulos) marca revisión.
+        self.assertTrue(p["revisar_planilla"])
+
+    def test_tope_de_seis_titulos(self):
+        titulos = [f"Columna {k+1}" for k in range(8)]
+        p = gem._normalizar_planilla(self._planilla_cruda(
+            titulos, [[42] * 6] * 10
+        ))
+        self.assertEqual(len(p["encabezado"]["otras_columnas"]), gem.MAX_N_OTRAS)
+        self.assertEqual(p["encabezado"]["otras_columnas"], titulos[:6])
+
+    def test_sin_columnas_otras_normaliza_vacio(self):
+        # Sin la clave en el encabezado ni en los estudiantes (pre-cambio):
+        # lista vacía y sin flags, sin marcar revisión.
+        enc = {
+            "institucion": "I", "sede": "S", "año_lectivo": "2026",
+            "jornada": "M", "grupo": "0302", "asignatura": "A",
+            "docente": "D", "periodo": 3, "n_area_trabajo": 2,
+        }
+        estudiantes = [
+            {"no": i, "nombre": f"ALUMNO {i}", "ev_anteriores": [45, 45],
+             "area_trabajo": [40, 50], "retirado": False, "revisar": [False, False]}
+            for i in range(1, 11)
+        ]
+        p = gem._normalizar_planilla({"encabezado": enc, "estudiantes": estudiantes})
+        self.assertEqual(p["encabezado"]["otras_columnas"], [])
+        self.assertEqual(p["estudiantes"][0]["otras_notas"], [])
+        self.assertEqual(p["estudiantes"][0]["revisar_otras"], [])
+        self.assertFalse(p["revisar_planilla"])
+
+    def test_alinea_valores_a_titulos_declarados(self):
+        # Declarados 2 títulos y el modelo trae 1 valor por alumno: se alinea
+        # con padding (None) al largo declarado y sin flags de revisión.
+        p = gem._normalizar_planilla(self._planilla_cruda(
+            ["Parcial", "Recuperatorio"], [[42]] * 10
+        ))
+        est = p["estudiantes"][0]
+        self.assertEqual(len(p["encabezado"]["otras_columnas"]), 2)
+        self.assertEqual(est["otras_notas"], [42, None])
+        self.assertEqual(est["revisar_otras"], [False, False])
+
+    def test_revisar_otras_del_modelo_con_coercion(self):
+        # El modelo marca con strings ("false"/"true"): se coerciona igual que
+        # "revisar", y la celda ambigua "4 5" queda None + revisar True.
+        otras_por_alumno = [[40, "4 5"]] + [[40, 50]] * 9
+        flags_por_alumno = [["false", "true"]] + [["false", "false"]] * 9
+        p = gem._normalizar_planilla(self._planilla_cruda(
+            ["Parcial", "Recuperatorio"], otras_por_alumno
+        ))
+        est0 = p["estudiantes"][0]
+        self.assertEqual(est0["otras_notas"][0], 40)
+        self.assertFalse(est0["revisar_otras"][0])  # "false" no es True (W6)
+        self.assertIsNone(est0["otras_notas"][1])
+        self.assertTrue(est0["revisar_otras"][1])
+
+    def test_scalar_revisar_otras_se_aplica_a_la_primera(self):
+        # Flag escalar (1): solo la primera celda queda marcada, el resto False.
+        planilla_cruda = self._planilla_cruda(
+            ["Parcial", "Recuperatorio"], [[40, 50]] * 10
+        )
+        planilla_cruda["estudiantes"][0]["revisar_otras"] = 1
+        p = gem._normalizar_planilla(planilla_cruda)
+        est0 = p["estudiantes"][0]
+        self.assertEqual(est0["revisar_otras"], [True, False])
+
+    def test_retirado_lleva_otras_vacias(self):
+        planilla_cruda = self._planilla_cruda(
+            ["Parcial"], [[42]] * 10
+        )
+        planilla_cruda["estudiantes"][4]["retirado"] = True
+        planilla_cruda["estudiantes"][4]["area_trabajo"] = None
+        p = gem._normalizar_planilla(planilla_cruda)
+        ret = p["estudiantes"][4]
+        self.assertTrue(ret["retirado"])
+        self.assertEqual(ret["otras_notas"], [])
+        self.assertEqual(ret["revisar_otras"], [])
+
+    def test_longitud_inconsistente_marca_revisar_planilla(self):
+        # 3 valores con 2 títulos declarados -> inconsistencia (sobre el CRUDO)
+        # -> revisar_planilla True (los 10 alumnos activos mantienen el resto).
+        mal = self._planilla_cruda(["Parcial", "Recuperatorio"], [[42, 43]] * 10)
+        mal["estudiantes"][0]["otras_notas"] = [42, 43, 44]
+        self.assertTrue(gem._normalizar_planilla(mal)["revisar_planilla"])
+
+        bien = self._planilla_cruda(["Parcial", "Recuperatorio"], [[42, 43]] * 10)
+        self.assertFalse(gem._normalizar_planilla(bien)["revisar_planilla"])
+
+    def test_prompt_pide_columnas_otras(self):
+        # Guardas de regresión: el prompt pide las columnas "otras" en el JSON
+        # de encabezado y de estudiantes, y nombra ejemplos de títulos.
+        self.assertIn("otras_columnas", gem._PROMPT_PLANILLA)
+        self.assertIn("otras_notas", gem._PROMPT_PLANILLA)
+        self.assertIn("revisar_otras", gem._PROMPT_PLANILLA)
+        self.assertIn("Trabajo Práctico", gem._PROMPT_PLANILLA)
+        self.assertIn("Recuperatorio", gem._PROMPT_PLANILLA)
+
+
 if __name__ == "__main__":
     unittest.main()

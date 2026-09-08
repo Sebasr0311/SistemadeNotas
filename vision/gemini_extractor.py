@@ -11,14 +11,18 @@ Salida esperada por página (la MISMA forma que espera `generar_excel_asignatura
             "institucion": str, "sede": str, "año_lectivo": str, "jornada": str,
             "grupo": "0GNN" (hasta "05XX"), "asignatura": str, "docente": str,
             "periodo": int (1-4),
+            "n_area_trabajo": int|None,  # declarado en la planilla (1 a 16)
+            "otras_columnas": [str, ...],  # 0 a MAX_N_OTRAS títulos "otras"
         },
         "estudiantes": [
             {
                 "no": int, "nombre": str,
                 "ev_anteriores": [float|None, ...],
                 "area_trabajo": [float|None, ...],  # 1 a MAX_N_AREAS notas
+                "otras_notas": [float|None, ...],   # alineado a otras_columnas
                 "retirado": bool,
                 "revisar": [bool, ...],  # alineado a len(area_trabajo)
+                "revisar_otras": [bool, ...],  # alineado a len(otras_notas)
             }, ...
         ],
     }
@@ -30,6 +34,9 @@ Reglas aplicadas:
 - Rango razonable de notas 0-100; fuera de rango -> revisión True.
 - Filas "****" (retirado) -> retirado=True, sin datos.
 - Se ignoran las columnas "Min" y "Fls.".
+- Toda OTRA columna con notas numéricas por alumno (trabajo práctico, parcial,
+  recuperatorio, definitivas intermedias, etc.) va en "otras_columnas" +
+  "otras_notas" por estudiante; la usuaria decide después si entra a la nota.
 """
 
 import json
@@ -64,6 +71,12 @@ MAX_ESTUDIANTES_SANOS = 60
 # seguridad; la validación de planilla es la que se encarga de chequear la
 # consistencia con n_area_trabajo.
 MAX_N_AREAS = 16
+
+# Cantidad máxima de columnas "otras" por planilla (trabajo práctico, parcial,
+# recuperatorio, definitivas intermedias, etc.). Tope de seguridad para el
+# saneo del encabezado (otras_columnas): si el modelo detecta más, se quedan
+# las primeras en orden de izquierda a derecha.
+MAX_N_OTRAS = 6
 
 
 class VisionError(Exception):
@@ -242,6 +255,39 @@ def _normalizar_ev(valores, n_esperadas):
     return ev, revisar_ev
 
 
+def _normalizar_otras(valores, revisar_flags, n_esperadas):
+    """Columnas "otras" (trabajo práctico, parcial, recuperatorio, etc.).
+
+    Alinea a `n_esperadas` celdas: la cantidad de `otras_columnas` declaradas
+    en el encabezado, o lo observado si no hay nombres (dato + defensivo).
+    Misma semántica por celda que `_normalizar_area`:
+    - Celda en blanco -> None (sin marcar revisión).
+    - Valor ambiguo (dígitos separados) o no numérico -> None + revisar True.
+    - Fuera de rango (no entre 0 y 100) -> revisar True y dejar el valor.
+    - Los flags del modelo (`revisar_otras`) se alinean por posición; los que
+      faltan quedan en False y sólo actúa la heurística por celda.
+
+    Devuelve (otras: list, revisar: list[bool]) del mismo largo.
+    """
+    observado = len(valores) if isinstance(valores, list) else 0
+    n = n_esperadas if n_esperadas and n_esperadas > 0 else observado
+    n = min(n, MAX_N_OTRAS)
+    revisar = [
+        bool(revisar_flags[i]) if i < len(revisar_flags) else False
+        for i in range(n)
+    ]
+    otras = []
+    for i in range(n):
+        v = valores[i] if valores and i < len(valores) else None
+        num, confiable = _numero_plausible(v)
+        otras.append(num)
+        if not confiable and v not in (None, ""):
+            revisar[i] = True
+        if num is not None and not (RANGO_NOTA[0] <= num <= RANGO_NOTA[1]):
+            revisar[i] = True
+    return otras, revisar
+
+
 def _normalizar_planilla(datos: dict) -> dict:
     """
     Convierte el JSON crudo del modelo en la forma EXACTA que espera el
@@ -267,6 +313,24 @@ def _normalizar_planilla(datos: dict) -> dict:
         except (ValueError, TypeError):
             n_area_declarado = None
 
+    # "Otras" columnas de notas declaradas en el encabezado (trabajo práctico,
+    # parcial, recuperatorio, definitivas intermedias, etc.): lista de títulos
+    # en orden de izquierda a derecha. Se sanean: strings no vacíos, sin
+    # duplicados y con tope MAX_N_OTRAS (6) de seguridad.
+    otras_raw = enc_raw.get("otras_columnas")
+    otras_columnas = []
+    if isinstance(otras_raw, list):
+        vistos = set()
+        for titulo in otras_raw:
+            nombre = str(titulo or "").strip()
+            if not nombre or nombre in vistos:
+                continue
+            vistos.add(nombre)
+            otras_columnas.append(nombre)
+            if len(otras_columnas) >= MAX_N_OTRAS:
+                break
+    n_otras_declarado = len(otras_columnas)
+
     # Periodo parseado de forma tolerante (W2) y SIN corregir silenciosamente:
     # un periodo fuera de rango (ej. 9) ya no se transforma a 1 (W1).
     periodo, periodo_ok = _parsear_periodo(enc_raw.get("periodo"))
@@ -291,6 +355,9 @@ def _normalizar_planilla(datos: dict) -> dict:
         # generador pueden preferir el conteo de columnas del encabezado sobre
         # lo observado, y mostrar columnas con celdas vacías como corresponde.
         "n_area_trabajo": n_area_declarado,
+        # Títulos de las columnas "otras" (trabajo práctico, parcial, etc.),
+        # saneados y en orden de izquierda a derecha (0 a MAX_N_OTRAS).
+        "otras_columnas": otras_columnas,
     }
     if not grupo_ok:
         encabezado["grupo_erroneo"] = True
@@ -299,6 +366,10 @@ def _normalizar_planilla(datos: dict) -> dict:
 
     n_ev_anteriores = periodo - 1
     estudiantes = []
+    # Flag detectado sobre el CRUDO del modelo: si el encabezado declara
+    # títulos "otras" y algún alumno no retirado trae OTRA cantidad de valores,
+    # la planilla se marca para revisión manual (ver validación al final).
+    otras_inconsistentes = False
     for est in (datos.get("estudiantes") or []):
         if not isinstance(est, dict):
             continue
@@ -318,8 +389,10 @@ def _normalizar_planilla(datos: dict) -> dict:
                 "nombre": nombre,
                 "ev_anteriores": [],
                 "area_trabajo": None,
+                "otras_notas": [],
                 "retirado": True,
                 "revisar": [],
+                "revisar_otras": [],
                 "revisar_ev": False,
             })
             continue
@@ -345,13 +418,48 @@ def _normalizar_planilla(datos: dict) -> dict:
         area, revisar = _normalizar_area(est.get("area_trabajo"), rev_flags)
         ev, revisar_ev = _normalizar_ev(est.get("ev_anteriores"), n_ev_anteriores)
 
+        # Columnas "otras": flags del modelo con la MISMA coerción que "revisar"
+        # (lista alineada, o escalar aplicado a la primera celda).
+        rev_otras_flags = est.get("revisar_otras")
+        otras_modelo = est.get("otras_notas")
+        n_otras_modelo = len(otras_modelo) if isinstance(otras_modelo, list) else 0
+        flags_otras = [False] * n_otras_modelo
+        if isinstance(rev_otras_flags, list):
+            for i in range(n_otras_modelo):
+                val = rev_otras_flags[i] if i < len(rev_otras_flags) else None
+                r, conf = _coercion_bool(val)
+                flags_otras[i] = r if conf else True
+        elif isinstance(rev_otras_flags, bool):
+            # Flag escalar booleano: True aplica a la primera celda.
+            if rev_otras_flags and n_otras_modelo > 0:
+                flags_otras[0] = True
+        elif isinstance(rev_otras_flags, (int, float)):
+            # Escalar numérico: 1 aplica a la primera celda.
+            if n_otras_modelo > 0:
+                flags_otras[0] = rev_otras_flags == 1
+        otras, revisar_otras = _normalizar_otras(
+            otras_modelo, flags_otras, n_otras_declarado
+        )
+        # Consistencia sobre el CRUDO (no el normalizado): _normalizar_otras
+        # alinea por padding, así que una comparación post-normalización nunca
+        # detectaría un desajuste declarado vs. observado.
+        otras_crudas = otras_modelo
+        if (
+            n_otras_declarado > 0
+            and isinstance(otras_crudas, list)
+            and len(otras_crudas) != n_otras_declarado
+        ):
+            otras_inconsistentes = True
+
         estudiantes.append({
             "no": int(est.get("no") or 0),
             "nombre": nombre,
             "ev_anteriores": ev,
             "area_trabajo": area,
+            "otras_notas": otras,
             "retirado": False,
             "revisar": revisar,
+            "revisar_otras": revisar_otras,
             "revisar_ev": revisar_ev,
         })
 
@@ -372,6 +480,11 @@ def _normalizar_planilla(datos: dict) -> dict:
     # 2) Cantidad de alumnos no retirados fuera del rango sano -> revisión.
     activos = [e for e in estudiantes if not e.get("retirado")]
     if not (MIN_ESTUDIANTES_SANOS <= len(activos) <= MAX_ESTUDIANTES_SANOS):
+        revisar_planilla = True
+    # 3) Columnas "otras" inconsistentes: el encabezado declara títulos pero
+    #    algún alumno no retirado trae distinta cantidad de valores (crudo)
+    #    -> revisión manual (ver `otras_inconsistentes` más arriba).
+    if otras_inconsistentes:
         revisar_planilla = True
 
     return {
@@ -600,7 +713,8 @@ JSON válido (sin texto adicional, sin marcas de código), con esta estructura:
     "asignatura": "texto o cadena vacía si no aparece",
     "docente": "texto o cadena vacía si no aparece",
     "periodo": 3,
-    "n_area_trabajo": 4
+    "n_area_trabajo": 4,
+    "otras_columnas": ["Trabajo Práctico 1"]
   },
   "estudiantes": [
     {
@@ -608,8 +722,10 @@ JSON válido (sin texto adicional, sin marcas de código), con esta estructura:
       "nombre": "APELLIDO NOMBRE",
       "ev_anteriores": [45, 45],
       "area_trabajo": [40, 50],
+      "otras_notas": [42],
       "retirado": false,
-      "revisar": [false, false]
+      "revisar": [false, false],
+      "revisar_otras": [false]
     }
   ]
 }
@@ -670,11 +786,22 @@ REGLAS IMPORTANTES:
    - Si una columna parece una DEFINITIVA (promedio, definitiva de corte o de
      periodo), NO la incluyas en "area_trabajo": no es una nota del periodo
      actual, es un cálculo. La usuaria luego elige qué columnas usar.
+   - OTRA COLUMNA DE NOTAS: toda columna que contenga notas numéricas por
+     alumno y que NO sea de ev. anteriores ni de área de trabajo (por ejemplo:
+     "Trabajo Práctico", "Parcial", "Recuperatorio", "Definitiva 1", promedio,
+     etc.) se incluye en "otras_columnas" (arreglo de títulos en orden de
+     izquierda a derecha, del título impreso o inferido de la planilla), y el
+     valor de cada alumno en "otras_notas" (un valor por columna, en el MISMO
+     orden; null si la celda está en blanco). Si no hay ninguna columna de
+     este tipo, devolvé "otras_columnas": [] y "otras_notas": [] en cada
+     estudiante. "revisar_otras" es un arreglo de booleanos alineado a
+     "otras_notas", con las mismas reglas que "revisar".
    - IGNORA por completo las columnas tituladas "Min" y "Fls.": no las leas ni
      las guardes. Aunque traigan números reales (minutos de tardanza y
      cantidad de faltas), esos datos no son parte del sistema.
    - Si una fila está marcada con asteriscos (****) o dice "retirado", pon
-     "retirado": true, "area_trabajo": null y "ev_anteriores": [].
+     "retirado": true, "area_trabajo": null, "ev_anteriores": [],
+     "otras_notas": [] y "revisar_otras": [].
    - La fila retirado suele venir con "********" en TODAS sus celdas (leyenda,
      Ev. Anteriores, Min, Fls., cada columna de Área de Trabajo y Fallas). Son
      una sola marca, no datos: poné "retirado": true y no intentes leer los

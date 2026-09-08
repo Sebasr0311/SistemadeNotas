@@ -80,16 +80,18 @@ class ColumnConfig:
         return cls(modo=data.get("modo", "simple"), columnas=data.get("columnas", []))
 
     @classmethod
-    def crear_desde_planilla(cls, n_areas, n_ev=0):
+    def crear_desde_planilla(cls, n_areas, n_ev=0, nombres_otras=None):
         """Crea una config por defecto: simple, todas las columnas incluidas,
         peso por defecto = 100 / total.
 
         Si `n_ev > 0`, la lista empieza con las "Def. Periodo 1..n_ev" (campo
-        `ev_anteriores`, tipo "ev") y sigue con las "Área Trabajo 1..n_areas"
-        (tipo "area"). Con el default `n_ev=0` se conserva el comportamiento
-        histórico (solo columnas de área).
+        `ev_anteriores`, tipo "ev"), sigue con las "Área Trabajo 1..n_areas"
+        (tipo "area") y termina con las columnas "otras" (tipo "otra", un dict
+        por título con `{"nombre": <título>, "tipo": "otra", "pos": k, ...}`).
+        Con los defaults `n_ev=0` y `nombres_otras=None` se conserva el
+        comportamiento histórico (solo columnas de área).
         """
-        total = n_areas + n_ev
+        total = n_areas + n_ev + (len(nombres_otras) if nombres_otras else 0)
         peso = round(100.0 / total, 1) if total > 0 else 0
         columnas = []
         for k in range(n_ev):
@@ -108,6 +110,14 @@ class ColumnConfig:
                 "incluida": True,
                 "peso": peso,
             })
+        for k, titulo in enumerate(nombres_otras or []):
+            columnas.append({
+                "nombre": str(titulo or "").strip() or f"Otras notas {k+1}",
+                "tipo": "otra",
+                "pos": k,
+                "incluida": True,
+                "peso": peso,
+            })
         return cls(modo="simple", columnas=columnas)
 
 
@@ -116,7 +126,7 @@ def nombres_columnas_areas(enc, n_areas):
     return [f"Área Trabajo {k+1}" for k in range(n_areas)]
 
 
-def _ref_columna(col_ev_start, col_at1, r, i, col):
+def _ref_columna(col_ev_start, col_at1, r, i, col, col_otras_start=None):
     """Resuelve la referencia de celda de una columna candidata según su tipo.
 
     Devuelve la referencia completa con fila (ej. "C12").
@@ -125,19 +135,33 @@ def _ref_columna(col_ev_start, col_at1, r, i, col):
     - tipo "area" (o sin tipo, retrocompat) -> letra de `col_at1 + pos` + fila `r`.
       Si no hay `pos`, se usa el índice `i` en la lista (comportamiento histórico,
       donde todas las columnas eran de área).
+    - tipo "otra" -> letra de `col_otras_start + pos` + fila `r`. Requiere
+      `col_otras_start` (columna donde empiezan las "otras" ya corridas en la
+      hoja); si es None -> ValueError (candidata "otra" sin zona de otras).
     """
     from openpyxl.utils import get_column_letter as gcl
 
     tipo = col.get("tipo")
     if tipo == "ev":
         return f"{gcl(col_ev_start + col.get('pos', 0))}{r}"
+    if tipo == "otra":
+        if col_otras_start is None:
+            raise ValueError(
+                "Columna candidata tipo 'otra' sin col_otras_start: "
+                "no hay zona de columnas 'otras' en la hoja."
+            )
+        pos = col.get("pos")
+        if pos is None:
+            pos = 0
+        return f"{gcl(col_otras_start + int(pos))}{r}"
     pos = col.get("pos")
     if pos is None:
         pos = i
     return f"{gcl(col_at1 + pos)}{r}"
 
 
-def _formula_definitiva(col_ev_start, col_at1, r, n_areas, column_config=None):
+def _formula_definitiva(col_ev_start, col_at1, r, n_areas, column_config=None,
+                        col_otras_start=None):
     """
     Genera la fórmula de Excel para la definitiva de un curso.
 
@@ -147,9 +171,11 @@ def _formula_definitiva(col_ev_start, col_at1, r, n_areas, column_config=None):
         r: fila del estudiante
         n_areas: total de columnas de área de trabajo (para el modo simple sin config)
         column_config: ColumnConfig (None = modo simple con todas las columnas).
+        col_otras_start: columna de la primera columna "otra" (1-based, ya
+            corrida en la hoja). Solo necesario si la config trae tipo "otra".
 
     Cada columna de la config se resuelve según su tipo: "ev" -> col_ev_start + pos,
-    "area" (o sin tipo) -> col_at1 + pos.
+    "area" (o sin tipo) -> col_at1 + pos, "otra" -> col_otras_start + pos.
 
     Fórmulas generadas:
         Sin config / simple:    =IFERROR(SUM(col_at1:col_def-1)/n_areas,"")
@@ -171,7 +197,8 @@ def _formula_definitiva(col_ev_start, col_at1, r, n_areas, column_config=None):
 
     if not column_config.es_pesado():
         # Promedio simple de columnas seleccionadas
-        refs = [_ref_columna(col_ev_start, col_at1, r, i, columnas[i]) for i in seleccionadas]
+        refs = [_ref_columna(col_ev_start, col_at1, r, i, columnas[i], col_otras_start)
+                for i in seleccionadas]
         if len(refs) == 1:
             return f"=IFERROR({refs[0]},\"\")"
         return f"=IFERROR(AVERAGE({','.join(refs)}),\"\")"
@@ -183,14 +210,15 @@ def _formula_definitiva(col_ev_start, col_at1, r, n_areas, column_config=None):
         return ""
     if n == 1:
         # Un solo factor: se usa directamente (peso irrelevante)
-        ref = _ref_columna(col_ev_start, col_at1, r, seleccionadas[0], columnas[seleccionadas[0]])
+        ref = _ref_columna(col_ev_start, col_at1, r, seleccionadas[0],
+                           columnas[seleccionadas[0]], col_otras_start)
         return f"=IFERROR({ref},\"\")"
 
     # Construir la fórmula con una referencia de columna por cada peso
     # para que el recálculo automático funcione.
     partes = []
     for i in seleccionadas:
-        letra = _ref_columna(col_ev_start, col_at1, r, i, columnas[i])
+        letra = _ref_columna(col_ev_start, col_at1, r, i, columnas[i], col_otras_start)
 
         # el "letra" ya incluye la fila (ej. "E11"); el peso va multiplicando.
         partes.append(f"{letra}*{pesos[i]}")
@@ -237,6 +265,27 @@ def calcular_n_areas(enc, estudiantes) -> int:
     return n_areas
 
 
+def calcular_n_otras(enc, estudiantes) -> int:
+    """Cantidad de columnas "otras" de una planilla (trabajo práctico, parcial,
+    recuperatorio, definitivas intermedias, etc.).
+
+    Misma lógica que usa el generador para dimensionar la hoja, extraída como
+    función pura para que la GUI calcule EXACTAMENTE el mismo ancho:
+    - Si el encabezado declara `otras_columnas` como lista, prevalece su largo
+      (celdas vacías al final si hay menos observadas).
+    - Si no, se usa lo observado: la mayor cantidad de notas "otras" por alumno.
+    - Sin nada que medir -> 0 (sin zona de columnas otras).
+    """
+    otras_enc = enc.get("otras_columnas")
+    if isinstance(otras_enc, list):
+        return len(otras_enc)
+    longitudes = [
+        len(est.get("otras_notas") or [])
+        for est in estudiantes
+    ]
+    return max(longitudes) if longitudes else 0
+
+
 def _escribir_hoja(ws, planilla: dict, column_config=None):
     """
     Escribe una hoja de Excel con los datos de una planilla.
@@ -259,6 +308,12 @@ def _escribir_hoja(ws, planilla: dict, column_config=None):
 
     # --- Ancho de la zona de área de trabajo (spec v2: 1 a 16 notas) ---
     n_areas = calcular_n_areas(enc, estudiantes)
+
+    # --- Zona de columnas "otras" (trabajo práctico, parcial, etc.) ---
+    n_otras = calcular_n_otras(enc, estudiantes)
+    otras_titulos = list((enc.get("otras_columnas") or [])[:n_otras])
+    while len(otras_titulos) < n_otras:
+        otras_titulos.append(f"Otras notas {len(otras_titulos)+1}")
 
     bold = Font(bold=True)
     header_fill = PatternFill("solid", fgColor="D9E1F2")
@@ -304,6 +359,7 @@ def _escribir_hoja(ws, planilla: dict, column_config=None):
     for p in range(1, n_ev_anteriores + 1):
         cols.append(f"Def. Periodo {p}")
     cols += [f"Área Trabajo {k}" for k in range(1, n_areas + 1)]
+    cols += otras_titulos
     cols.append(f"Definitiva Periodo {periodo}")
     incluir_anual = periodo == 4 and n_ev_anteriores == 3
     if incluir_anual:
@@ -318,7 +374,8 @@ def _escribir_hoja(ws, planilla: dict, column_config=None):
 
     col_ev_start = 3
     col_at1 = col_ev_start + n_ev_anteriores
-    col_def = col_at1 + n_areas
+    col_otras_start = col_at1 + n_areas
+    col_def = col_otras_start + n_otras
     col_anual = col_def + 1 if incluir_anual else None
 
     r = header_row + 1
@@ -349,11 +406,21 @@ def _escribir_hoja(ws, planilla: dict, column_config=None):
             if k < len(revisar) and revisar[k]:
                 c.fill = revisar_fill
 
+        otr = est.get("otras_notas")
+        revisar_otras = est.get("revisar_otras") or []
+        for k in range(n_otras):
+            v = otr[k] if otr and k < len(otr) else None
+            c = ws.cell(row=r, column=col_otras_start + k, value=v)
+            c.border = border
+            c.alignment = center
+            if k < len(revisar_otras) and revisar_otras[k]:
+                c.fill = revisar_fill
+
         # ── Definitiva del periodo (con column_config si la hay) ──
         cdef = ws.cell(row=r, column=col_def)
         if at and len(at) >= 1:
             cdef.value = _formula_definitiva(
-                col_ev_start, col_at1, r, n_areas, column_config
+                col_ev_start, col_at1, r, n_areas, column_config, col_otras_start
             )
         cdef.border = border; cdef.alignment = center
         cdef.font = bold
