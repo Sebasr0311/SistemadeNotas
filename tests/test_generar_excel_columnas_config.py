@@ -131,13 +131,15 @@ class TestColumnConfigBase(unittest.TestCase):
         self.assertEqual(cfg.modo, "simple")
 
     def test_crear_desde_planilla_con_ev(self):
-        # Periodo 3 => 2 evs + 2 áreas: primero "Def. Periodo 1..2", luego
+        # Periodo 3 => 2 evs + 2 áreas: primero "Def. Periodo 1..2" (tipo "ev",
+        # NO cuentan para la definitiva: nacen desmarcadas), luego
         # "Área Trabajo 1..2", cada una con su tipo y pos.
         cfg = ColumnConfig.crear_desde_planilla(2, n_ev=2)
         self.assertEqual(len(cfg.columnas), 4)
         self.assertEqual(cfg.columnas[0]["nombre"], "Def. Periodo 1")
         self.assertEqual(cfg.columnas[0]["tipo"], "ev")
         self.assertEqual(cfg.columnas[0]["pos"], 0)
+        self.assertFalse(cfg.columnas[0]["incluida"])
         self.assertEqual(cfg.columnas[1]["nombre"], "Def. Periodo 2")
         self.assertEqual(cfg.columnas[1]["pos"], 1)
         self.assertEqual(cfg.columnas[2]["nombre"], "Área Trabajo 1")
@@ -145,10 +147,10 @@ class TestColumnConfigBase(unittest.TestCase):
         self.assertEqual(cfg.columnas[2]["pos"], 0)
         self.assertEqual(cfg.columnas[3]["nombre"], "Área Trabajo 2")
         self.assertEqual(cfg.columnas[3]["pos"], 1)
-        # Peso por defecto reparte 100 entre el total (4).
-        self.assertEqual(cfg.columnas[0]["peso"], 25.0)
-        self.assertTrue(all(c["incluida"] for c in cfg.columnas))
-        self.assertEqual(cfg.columnas_seleccionadas, [0, 1, 2, 3])
+        # Peso por defecto reparte 100 entre las columnas que CUENTAN (2 áreas).
+        self.assertEqual(cfg.columnas[0]["peso"], 50.0)
+        self.assertTrue(all(c["incluida"] for c in cfg.columnas[2:]))
+        self.assertEqual(cfg.columnas_seleccionadas, [2, 3])
 
 
 class TestFormulasUnicas(unittest.TestCase):
@@ -166,11 +168,11 @@ class TestFormulasUnicas(unittest.TestCase):
             '=IFERROR(SUM(E11:I11)/5,"")',
         )
 
-    def test_simple_con_todas_average_rango_completo(self):
+    def test_simple_con_todas_sum_divisor_fijo(self):
         cfg = ColumnConfig.crear_desde_planilla(5)
         self.assertEqual(
             self._f(cfg),
-            '=IFERROR(AVERAGE(E11,F11,G11,H11,I11),"")',
+            '=IFERROR(SUM(E11,F11,G11,H11,I11)/5,"")',
         )
 
     def test_simple_solo_columnas_seleccionadas(self):
@@ -182,9 +184,11 @@ class TestFormulasUnicas(unittest.TestCase):
                       {"nombre": "A4", "incluida": False, "peso": 0},
                       {"nombre": "A5", "incluida": False, "peso": 0}],
         )
+        # Divisor fijo = 2 (las dos columnas que entran), aunque el alumno
+        # pudiera tener solo una celda llena.
         self.assertEqual(
             self._f(cfg),
-            '=IFERROR(AVERAGE(E11,G11),"")',
+            '=IFERROR(SUM(E11,G11)/2,"")',
         )
 
     def test_simple_una_sola_columna_seleccionada_referencia_directa(self):
@@ -257,10 +261,10 @@ class TestFormulasUnicas(unittest.TestCase):
         return generador._formula_definitiva(3, 5, 11, 5, self._cfg_mixta(seleccion))
 
     def test_simple_mixto_def_periodo1_y_area2(self):
-        # Def. Periodo 1 -> C(3); Área Trabajo 2 -> F(6) (col_at1=5 + pos 1).
+        # Def. Periodo 1 (C) NO cuenta: solo entra Área Trabajo 2 (F).
         self.assertEqual(
             self._f_mixta_simple({"D1", "A2"}),
-            '=IFERROR(AVERAGE(C11,F11),"")',
+            '=IFERROR(F11,"")',
         )
 
     def test_pesos_mixto_def_periodo_y_area(self):
@@ -268,9 +272,11 @@ class TestFormulasUnicas(unittest.TestCase):
         cfg.modo = "pesos"
         for c in cfg.columnas:
             c["peso"] = 25
+        # Las "Def. Periodo" (C, D) se excluyen aunque vengan marcadas:
+        # solo cuentan las áreas (E, F).
         self.assertEqual(
             generador._formula_definitiva(3, 5, 11, 5, cfg),
-            '=IFERROR((C11*25+D11*25+E11*25+F11*25)/100,"")',
+            '=IFERROR((E11*25+F11*25)/100,"")',
         )
 
 
@@ -293,9 +299,9 @@ class TestExcelEndToEndConConfig(unittest.TestCase):
         # definitiva en I(9). Alumno 1 = fila header + 1.
         hr = _fila_header(ws)
         fila1 = hr + 1
-        # Solo columnas 1 y 3 (0-based: índices 0 y 2) -> E y G
+        # Solo columnas 1 y 3 (0-based: índices 0 y 2) -> E y G; divisor fijo 2.
         self.assertEqual(ws.cell(row=fila1, column=9).value,
-                         '=IFERROR(AVERAGE(E{f},G{f}),"")'.format(f=fila1))
+                         '=IFERROR(SUM(E{f},G{f})/2,"")'.format(f=fila1))
         # La columna excluida conserva su nota, pero no entra a la fórmula.
         self.assertEqual(ws.cell(row=fila1, column=6).value, 50)
 
@@ -332,8 +338,8 @@ class TestExcelEndToEndConConfig(unittest.TestCase):
                          '=IFERROR(SUM(E11:F11)/2,"")')
 
     def test_mixto_end_to_end_simple(self):
-        # Planilla periodo 3 (2 evs) con 2 áreas. Selección mixta: "Def. Periodo 1"
-        # (col C = 3) y "Área Trabajo 2" (col F = 6). En modo simple => AVERAGE.
+        # Planilla periodo 3 (2 evs) con 2 áreas. "Def. Periodo 1" (col C) NO
+        # cuenta aunque venga marcada; solo entra "Área Trabajo 2" (col F).
         planilla = _planilla(
             [[40, 50], [41, 51]],
             n_area_trabajo=2,
@@ -349,13 +355,14 @@ class TestExcelEndToEndConConfig(unittest.TestCase):
         hr = _fila_header(ws)
         fila1 = hr + 1
         self.assertEqual(ws.cell(row=fila1, column=7).value,
-                         f'=IFERROR(AVERAGE(C{fila1},F{fila1}),"")')
+                         f'=IFERROR(F{fila1},"")')
         # Valores físicos: ev1 en C, área2 en F.
         self.assertEqual(ws.cell(row=fila1, column=3).value, 45)  # ev1
         self.assertEqual(ws.cell(row=fila1, column=6).value, 50)  # área2
 
     def test_mixto_end_to_end_pesos(self):
-        # Mismo escenario, modo pesos con Def. Periodo 1 (60) y Área Trabajo 2 (40).
+        # Mismo escenario, modo pesos con Def. Periodo 1 (60) y Área Trabajo 2
+        # (40): la "Def. Periodo" se excluye; solo queda el área (ref directa).
         planilla = _planilla(
             [[40, 50], [41, 51]],
             n_area_trabajo=2,
@@ -370,7 +377,7 @@ class TestExcelEndToEndConConfig(unittest.TestCase):
         hr = _fila_header(ws)
         fila1 = hr + 1
         self.assertEqual(ws.cell(row=fila1, column=7).value,
-                         f'=IFERROR((C{fila1}*60+F{fila1}*40)/100,"")')
+                         f'=IFERROR(F{fila1},"")')
 
 
 class TestExcelPorFormaConColumnConfigs(unittest.TestCase):
@@ -420,11 +427,11 @@ class TestExcelPorFormaConColumnConfigs(unittest.TestCase):
         self.assertIn("Pesos", valores2)
         self.assertIn("Pesos", [ws2.cell(row=r, column=2).value for r in range(1, hr2)])
 
-        # Forma n=4 (simple con todas): área E..H; definitiva en I(9).
+        # Forma n=4 (simple con todas): área E..H; definitiva en I(9); divisor fijo 4.
         hr4 = _fila_header(ws4)
         fila1 = hr4 + 1
         self.assertEqual(ws4.cell(row=fila1, column=9).value,
-                         '=IFERROR(AVERAGE(E{f},F{f},G{f},H{f}),"")'.format(f=fila1))
+                         '=IFERROR(SUM(E{f},F{f},G{f},H{f})/4,"")'.format(f=fila1))
         valores4 = [ws4.cell(row=r, column=1).value for r in range(1, hr4)]
         self.assertIn("Modo de cálculo", valores4)
         self.assertNotIn("Pesos", valores4)
@@ -577,7 +584,7 @@ class TestExcelPorIndiceConColumnConfigs(unittest.TestCase):
         hr1 = _fila_header(ws1)
         fila1 = hr1 + 1
         self.assertEqual(ws1.cell(row=fila1, column=9).value,
-                         '=IFERROR(AVERAGE(E{f},G{f}),"")'.format(f=fila1))
+                         '=IFERROR(SUM(E{f},G{f})/2,"")'.format(f=fila1))
 
         # La info de cada hoja refleja su propia config.
         valores0 = [ws0.cell(row=r, column=1).value for r in range(1, hr0)]
@@ -646,10 +653,11 @@ class TestColumnConfigOtras(unittest.TestCase):
         self.assertEqual(cfg.columnas[5]["nombre"], "Trabajo Práctico")
         self.assertEqual(cfg.columnas[5]["tipo"], "otra")
         self.assertEqual(cfg.columnas[5]["pos"], 1)
-        # Peso por defecto reparte 100 entre el total (6).
-        self.assertEqual(cfg.columnas[0]["peso"], round(100.0 / 6, 1))
-        self.assertTrue(all(c["incluida"] for c in cfg.columnas))
-        self.assertEqual(cfg.columnas_seleccionadas, [0, 1, 2, 3, 4, 5])
+        # Peso por defecto reparte 100 entre las columnas que CUENTAN (6 - 2 evs
+        # = 4 activas: 2 áreas + 2 otras). Las ev quedan desmarcadas.
+        self.assertEqual(cfg.columnas[0]["peso"], 25.0)
+        self.assertTrue(all(c["incluida"] for c in cfg.columnas[2:]))
+        self.assertEqual(cfg.columnas_seleccionadas, [2, 3, 4, 5])
 
     def test_sin_otras_conserva_firma_anterior(self):
         # Llamada con 2 args (retrocompat): misma config que antes.
@@ -690,16 +698,16 @@ class TestFormulasConOtras(unittest.TestCase):
         return generador._formula_definitiva(3, 5, 11, 5, config, col_otras_start)
 
     def test_simple_con_ev_area_y_otra(self):
-        # D2 -> D(4); A1 -> E(5); O2 -> H(8)+1 = I(9).
+        # D2 es "Def. Periodo" (no cuenta); A1 -> E(5); O2 -> H(8)+1 = I(9).
         cfg = self._cfg({"D2", "A1", "O2"})
-        self.assertEqual(self._f(cfg), '=IFERROR(AVERAGE(D11,E11,I11),"")')
+        self.assertEqual(self._f(cfg), '=IFERROR(SUM(E11,I11)/2,"")')
 
     def test_pesos_mixto_con_otras(self):
         cfg = self._cfg({"D1", "A2", "O1", "O2"}, modo="pesos")
-        # C (ev1), F (área2), H (otra1), I (otra2).
+        # D1 (ev) se excluye; quedan F (área2), H (otra1), I (otra2).
         self.assertEqual(
             self._f(cfg),
-            '=IFERROR((C11*25+F11*25+H11*25+I11*25)/100,"")',
+            '=IFERROR((F11*25+H11*25+I11*25)/100,"")',
         )
 
     def test_otra_sin_col_otras_start_lanza_valueerror(self):
@@ -741,10 +749,11 @@ class TestExcelEndToEndConOtras(unittest.TestCase):
         # Valores: G=42, H en blanco (None) por el padding declarado.
         self.assertEqual(ws.cell(row=fila1, column=7).value, 42)
         self.assertIsNone(ws.cell(row=fila1, column=8).value)
-        # Simple con todas (ev+áreas+otras): AVERAGE de C,D,E,F,G,H.
+        # Simple con las candidatas que cuentan (áreas+otras; las ev salen por
+        # defecto desmarcadas): SUM(E,F,G,H)/4 (divisor fijo = 4 activas).
         self.assertEqual(
             ws.cell(row=fila1, column=9).value,
-            f'=IFERROR(AVERAGE(C{fila1},D{fila1},E{fila1},F{fila1},G{fila1},H{fila1}),"")',
+            f'=IFERROR(SUM(E{fila1},F{fila1},G{fila1},H{fila1})/4,"")',
         )
 
     def test_periodo_4_con_otras_y_anual(self):
@@ -770,10 +779,11 @@ class TestExcelEndToEndConOtras(unittest.TestCase):
         self.assertEqual(ws.cell(row=hr, column=9).value, "Definitiva 1")
         self.assertEqual(ws.cell(row=hr, column=10).value, "Definitiva Periodo 4")
         self.assertEqual(ws.cell(row=hr, column=11).value, "Definitiva Anual")
-        # Simple con la selección mixta: E (ev3), G (área2), H, I.
+        # Simple con la selección mixta: la ev3 (E) NO cuenta; G (área2), H, I.
+        # Divisor fijo = 3.
         self.assertEqual(
             ws.cell(row=fila1, column=10).value,
-            f'=IFERROR(AVERAGE(E{fila1},G{fila1},H{fila1},I{fila1}),"")',
+            f'=IFERROR(SUM(G{fila1},H{fila1},I{fila1})/3,"")',
         )
         # Anual: promedio de las 3 evs + la definitiva del periodo.
         self.assertEqual(

@@ -703,7 +703,8 @@ class App(ctk.CTk):
             pantalla,
             text="Elegí qué notas entran a la definitiva del periodo. Cada planilla "
             "se configura por separado; seleccioná la planilla en el desplegable.\n"
-            "Hacé clic en la imagen para ver la planilla completa.",
+            "Las columnas «Def. Periodo» no cuentan para la nota definitiva y no "
+            "se pueden marcar. Hacé clic en la imagen para ver la planilla completa.",
             font=(styles.FUENTE, styles.TAM_TEXTO_CHICO), text_color=styles.COLOR_TEXTO_SECUNDARIO,
             justify="center", wraplength=720,
         ).pack(pady=(0, 10))
@@ -1200,12 +1201,18 @@ class App(ctk.CTk):
             g = 2 + ci
             celda = ctk.CTkFrame(tabla, fg_color="transparent")
             celda.grid(row=0, column=g, padx=2, pady=(3, 0))
-            var_chk = tk.BooleanVar(value=col.get("incluida", True))
+            # Las columnas "Def. Periodo N" no cuentan para la definitiva:
+            # se muestran desmarcadas y deshabilitadas (regla de negocio).
+            es_ev = col.get("tipo") == "ev"
+            var_chk = tk.BooleanVar(
+                value=False if es_ev else col.get("incluida", True)
+            )
             self._chk_col[idx][ci] = var_chk
             ctk.CTkCheckBox(
                 celda, text="", variable=var_chk, width=24,
                 command=lambda idx=idx, ci=ci: self._on_toggle_col(idx, ci),
                 checkbox_width=18, checkbox_height=18,
+                state="disabled" if es_ev else "normal",
             ).pack(anchor="center", pady=(0, 1))
             if modo == "pesos":
                 var_peso = tk.StringVar(value=_fmt_peso(col.get("peso")))
@@ -1217,7 +1224,7 @@ class App(ctk.CTk):
                 )
                 entrada.pack(anchor="center", pady=(0, 2))
                 entrada.configure(
-                    state="normal" if col.get("incluida", True) else "disabled"
+                    state="disabled" if (es_ev or not col.get("incluida", True)) else "normal"
                 )
                 self._peso_entry[idx][ci] = entrada
 

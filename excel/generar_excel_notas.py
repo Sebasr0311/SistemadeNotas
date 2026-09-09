@@ -81,17 +81,22 @@ class ColumnConfig:
 
     @classmethod
     def crear_desde_planilla(cls, n_areas, n_ev=0, nombres_otras=None):
-        """Crea una config por defecto: simple, todas las columnas incluidas,
-        peso por defecto = 100 / total.
+        """Crea una config por defecto: simple, con todas las columnas de notas
+        incluidas EXCEPTO las "Def. Periodo N" (tipo "ev"), que son resúmenes de
+        periodos anteriores y no entran a la nota promedio del periodo actual
+        (regla de negocio).
 
         Si `n_ev > 0`, la lista empieza con las "Def. Periodo 1..n_ev" (campo
-        `ev_anteriores`, tipo "ev"), sigue con las "Área Trabajo 1..n_areas"
-        (tipo "area") y termina con las columnas "otras" (tipo "otra", un dict
-        por título con `{"nombre": <título>, "tipo": "otra", "pos": k, ...}`).
+        `ev_anteriores`, tipo "ev", desmarcadas), sigue con las
+        "Área Trabajo 1..n_areas" (tipo "area") y termina con las columnas
+        "otras" (tipo "otra", un dict por título con
+        `{"nombre": <título>, "tipo": "otra", "pos": k, ...}`).
+        El peso por defecto reparte 100 solo entre las columnas que cuentan
+        (áreas + otras); las "ev" quedan desmarcadas y sin efecto.
         Con los defaults `n_ev=0` y `nombres_otras=None` se conserva el
         comportamiento histórico (solo columnas de área).
         """
-        total = n_areas + n_ev + (len(nombres_otras) if nombres_otras else 0)
+        total = n_areas + (len(nombres_otras) if nombres_otras else 0)
         peso = round(100.0 / total, 1) if total > 0 else 0
         columnas = []
         for k in range(n_ev):
@@ -99,7 +104,10 @@ class ColumnConfig:
                 "nombre": f"Def. Periodo {k+1}",
                 "tipo": "ev",
                 "pos": k,
-                "incluida": True,
+                # Resumen de un periodo anterior: no cuenta para la definitiva
+                # del periodo actual. El generador la filtra aunque venga
+                # marcada de una config vieja.
+                "incluida": False,
                 "peso": peso,
             })
         for k in range(n_areas):
@@ -176,10 +184,15 @@ def _formula_definitiva(col_ev_start, col_at1, r, n_areas, column_config=None,
 
     Cada columna de la config se resuelve según su tipo: "ev" -> col_ev_start + pos,
     "area" (o sin tipo) -> col_at1 + pos, "otra" -> col_otras_start + pos.
+    Las columnas tipo "ev" ("Def. Periodo N") JAMÁS entran a la definitiva:
+    son resúmenes de periodos anteriores y no cuentan para la nota promedio
+    del estudiante (regla de negocio), aunque la config las traiga marcadas.
 
     Fórmulas generadas:
         Sin config / simple:    =IFERROR(SUM(col_at1:col_def-1)/n_areas,"")
-        Simple con seleccionadas: =IFERROR(AVERAGE(refs),"") (1 → IFERROR(ref,""))
+        Simple con seleccionadas: =IFERROR(SUM(refs)/N,"") (N = total de refs;
+            divisor FIJO aunque un estudiante tenga menos notas llenas;
+            1 → IFERROR(ref,"")).
         Pesos:                  =IFERROR((ref*peso+...+ref*peso)/divisor,"")
     """
     from openpyxl.utils import get_column_letter as gcl
@@ -191,17 +204,26 @@ def _formula_definitiva(col_ev_start, col_at1, r, n_areas, column_config=None,
         return f"=IFERROR(SUM({at1_ref}:{atn_ref})/{n_areas},\"\")"
 
     columnas = column_config.columnas
-    seleccionadas = column_config.columnas_seleccionadas
+    # Regla de negocio: "Def. Periodo N" (tipo "ev") son resúmenes de periodos
+    # anteriores. Nunca entran a la nota promedio del estudiante, aunque la
+    # config venga de otra versión con ellas incluidas.
+    seleccionadas = [
+        i for i in column_config.columnas_seleccionadas
+        if columnas[i].get("tipo") != "ev"
+    ]
     if not seleccionadas:
         return ""
 
     if not column_config.es_pesado():
-        # Promedio simple de columnas seleccionadas
+        # Promedio simple con divisor FIJO = cantidad de columnas que entran:
+        # si hay 4 notas en total, todos se dividen entre 4; el estudiante que
+        # solo tiene 3 notas suma las 3 y divide entre 4 igual (AVERAGE dividía
+        # entre las notas presentes, que era el comportamiento incorrecto).
         refs = [_ref_columna(col_ev_start, col_at1, r, i, columnas[i], col_otras_start)
                 for i in seleccionadas]
         if len(refs) == 1:
             return f"=IFERROR({refs[0]},\"\")"
-        return f"=IFERROR(AVERAGE({','.join(refs)}),\"\")"
+        return f"=IFERROR(SUM({','.join(refs)})/{len(refs)},\"\")"
 
     # ── Modo pesos ──
     pesos = column_config.pesos_seleccionados
